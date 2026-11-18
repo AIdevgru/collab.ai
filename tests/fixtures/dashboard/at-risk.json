@@ -1,0 +1,445 @@
+{
+  "ledger": {
+    "schema": 1,
+    "seq": 13,
+    "rev": null,
+    "pr": {
+      "repo": "o/r",
+      "number": 42,
+      "url": "https://github.com/o/r/pull/42",
+      "headRef": "feat/strings",
+      "baseRef": "main",
+      "defaultBranch": "main",
+      "ghLogin": "zwymer",
+      "mergeMethod": "squash"
+    },
+    "phase": "active",
+    "planner": null,
+    "config": {
+      "leaseMin": 90,
+      "reviewLeaseMin": 60,
+      "planLeaseMin": 15,
+      "reviewAlertH": 2,
+      "maxTasks": 12,
+      "wip": 1,
+      "worktreeRoot": ".collab/wt",
+      "verifyCmd": null,
+      "setupCmd": null
+    },
+    "agents": {
+      "claude-a1f3": {
+        "tool": "claude",
+        "vendor": "anthropic",
+        "host": "pc",
+        "pid": null,
+        "joinedAt": "2026-11-16T12:00:00.000Z",
+        "lastSeen": "2026-11-16T13:10:00.000Z"
+      },
+      "codex-7k2p": {
+        "tool": "codex",
+        "vendor": "openai",
+        "host": "pc",
+        "pid": null,
+        "joinedAt": "2026-11-16T12:01:00.000Z",
+        "lastSeen": "2026-11-16T12:12:00.000Z"
+      }
+    },
+    "tasks": {
+      "T1": {
+        "title": "Add a truncate() helper",
+        "desc": "",
+        "accept": [
+          "truncate('hello', 3) returns 'he…'"
+        ],
+        "scope": [
+          "src/truncate.*"
+        ],
+        "deps": [],
+        "size": "S",
+        "kind": "work",
+        "status": "done",
+        "owner": "claude-a1f3",
+        "leaseUntil": null,
+        "branch": "collab/pr-42/t1",
+        "subPr": 57,
+        "headSha": "9a89bc2621b4c45199d849b4940529847efe60be",
+        "touched": [
+          "src/truncate.js"
+        ],
+        "reviewer": null,
+        "reviewLeaseUntil": null,
+        "reviews": [
+          {
+            "agent": "codex-7k2p",
+            "vendor": "openai",
+            "verdict": "approve",
+            "sha": "9a89bc2621b4c45199d849b4940529847efe60be",
+            "commentId": 1008,
+            "at": "2026-11-16T12:08:00.000Z"
+          }
+        ],
+        "verify": [
+          {
+            "sha": "9a89bc2621b4c45199d849b4940529847efe60be",
+            "by": "claude-a1f3",
+            "ok": true,
+            "summary": "12 passed",
+            "at": "2026-11-16T12:05:00.000Z"
+          }
+        ],
+        "blocked": null,
+        "merged": {
+          "sha": "9a89bc2621b4c45199d849b4940529847efe60be",
+          "at": "2026-11-16T12:09:00.000Z",
+          "by": "claude-a1f3",
+          "mergeSha": "1fe89f8829772157ca1f6cc9521c59781f8c5d34"
+        },
+        "changeRounds": 0,
+        "times": {
+          "created": "2026-11-16T12:02:00.000Z",
+          "claimed": "2026-11-16T12:03:00.000Z",
+          "submitted": "2026-11-16T12:06:00.000Z",
+          "done": "2026-11-16T12:09:00.000Z"
+        },
+        "reviewSha": "9a89bc2621b4c45199d849b4940529847efe60be"
+      },
+      "T2": {
+        "title": "Add a slugify() helper",
+        "desc": "",
+        "accept": [],
+        "scope": [
+          "src/slug.*"
+        ],
+        "deps": [],
+        "size": "S",
+        "kind": "work",
+        "status": "claimed",
+        "owner": "codex-7k2p",
+        "leaseUntil": "2026-11-16T13:40:00.000Z",
+        "branch": "collab/pr-42/t2",
+        "subPr": 58,
+        "headSha": "b56415ac025f34dd190ae90946943586d95f14e0",
+        "touched": [
+          "src/slug.js"
+        ],
+        "reviewer": null,
+        "reviewLeaseUntil": null,
+        "reviews": [],
+        "verify": [],
+        "blocked": null,
+        "merged": null,
+        "changeRounds": 0,
+        "times": {
+          "created": "2026-11-16T12:02:00.000Z",
+          "claimed": "2026-11-16T12:10:00.000Z",
+          "submitted": null,
+          "done": null
+        }
+      },
+      "T3": {
+        "title": "Document the string helpers",
+        "desc": "",
+        "accept": [],
+        "scope": [
+          "docs/**"
+        ],
+        "deps": [
+          "T1"
+        ],
+        "size": "S",
+        "kind": "work",
+        "status": "open",
+        "owner": null,
+        "leaseUntil": null,
+        "branch": "collab/pr-42/t3",
+        "subPr": null,
+        "headSha": null,
+        "touched": [],
+        "reviewer": null,
+        "reviewLeaseUntil": null,
+        "reviews": [],
+        "verify": [],
+        "blocked": null,
+        "merged": null,
+        "changeRounds": 0,
+        "times": {
+          "created": "2026-11-16T12:02:00.000Z",
+          "claimed": null,
+          "submitted": null,
+          "done": null
+        }
+      },
+      "T4": {
+        "title": "Add a padStart() wrapper",
+        "desc": "",
+        "accept": [],
+        "scope": [
+          "src/pad.*"
+        ],
+        "deps": [],
+        "size": "S",
+        "kind": "work",
+        "status": "claimed",
+        "owner": "claude-a1f3",
+        "leaseUntil": "2026-11-16T14:40:00.000Z",
+        "branch": "collab/pr-42/t4",
+        "subPr": 59,
+        "headSha": "277be91741c5c4ea8ef257229480102e91c2d43c",
+        "touched": [
+          "src/pad.js"
+        ],
+        "reviewer": null,
+        "reviewLeaseUntil": null,
+        "reviews": [],
+        "verify": [],
+        "blocked": null,
+        "merged": null,
+        "changeRounds": 0,
+        "times": {
+          "created": "2026-11-16T12:02:00.000Z",
+          "claimed": "2026-11-16T12:42:00.000Z",
+          "submitted": null,
+          "done": null
+        }
+      },
+      "T5": {
+        "title": "Export the helpers from index.js",
+        "desc": "",
+        "accept": [],
+        "scope": [
+          "src/index.js"
+        ],
+        "deps": [
+          "T1",
+          "T2"
+        ],
+        "size": "S",
+        "kind": "work",
+        "status": "open",
+        "owner": null,
+        "leaseUntil": null,
+        "branch": "collab/pr-42/t5",
+        "subPr": null,
+        "headSha": null,
+        "touched": [],
+        "reviewer": null,
+        "reviewLeaseUntil": null,
+        "reviews": [],
+        "verify": [],
+        "blocked": null,
+        "merged": null,
+        "changeRounds": 0,
+        "times": {
+          "created": "2026-11-16T12:02:00.000Z",
+          "claimed": null,
+          "submitted": null,
+          "done": null
+        }
+      }
+    },
+    "nextTask": 6,
+    "directives": [],
+    "lastCommentId": 0,
+    "lastCommentAt": null,
+    "notices": {}
+  },
+  "live": {
+    "mainCi": "SUCCESS",
+    "mainMergeable": "MERGEABLE",
+    "mainState": "OPEN",
+    "additions": 412,
+    "deletions": 58,
+    "mainHeadSha": "1822562e6f0f2444bd907e99197d5656c194d113",
+    "subs": {
+      "T2": {
+        "state": "OPEN",
+        "merged": false,
+        "ci": "SUCCESS",
+        "mergeable": "MERGEABLE",
+        "headSha": "b56415ac025f34dd190ae90946943586d95f14e0",
+        "draft": false
+      },
+      "T4": {
+        "state": "OPEN",
+        "merged": false,
+        "ci": "FAILURE",
+        "mergeable": "MERGEABLE",
+        "headSha": "277be91741c5c4ea8ef257229480102e91c2d43c",
+        "draft": false
+      }
+    }
+  },
+  "history": [
+    {
+      "sha": "d5aef81d26ee2689465fae538184ebc6906cbff6",
+      "at": "2026-11-16T13:10:00.000Z",
+      "event": {
+        "v": 1,
+        "seq": 13,
+        "type": "task.push",
+        "agent": "claude-a1f3",
+        "data": {
+          "headSha": "277be91741c5c4ea8ef257229480102e91c2d43c",
+          "touched": [
+            "src/pad.js"
+          ],
+          "leaseUntil": "2026-11-16T14:40:00.000Z",
+          "subPr": 59
+        },
+        "at": "2026-11-16T13:10:00.000Z",
+        "task": "T4"
+      }
+    },
+    {
+      "sha": "88fc5f8f65d3ac450a73db544d4b1b9975360cfa",
+      "at": "2026-11-16T12:42:00.000Z",
+      "event": {
+        "v": 1,
+        "seq": 12,
+        "type": "task.claim",
+        "agent": "claude-a1f3",
+        "data": {
+          "leaseUntil": "2026-11-16T14:12:00.000Z"
+        },
+        "at": "2026-11-16T12:42:00.000Z",
+        "task": "T4"
+      }
+    },
+    {
+      "sha": "10d3628a323e786b265bc108c67889191e661186",
+      "at": "2026-11-16T12:12:00.000Z",
+      "event": {
+        "v": 1,
+        "seq": 11,
+        "type": "task.push",
+        "agent": "codex-7k2p",
+        "data": {
+          "headSha": "b56415ac025f34dd190ae90946943586d95f14e0",
+          "touched": [
+            "src/slug.js"
+          ],
+          "leaseUntil": "2026-11-16T13:40:00.000Z",
+          "subPr": 58
+        },
+        "at": "2026-11-16T12:12:00.000Z",
+        "task": "T2"
+      }
+    },
+    {
+      "sha": "3a9047a5acb895985d0297d48a33069f6a1aaa6b",
+      "at": "2026-11-16T12:10:00.000Z",
+      "event": {
+        "v": 1,
+        "seq": 10,
+        "type": "task.claim",
+        "agent": "codex-7k2p",
+        "data": {
+          "leaseUntil": "2026-11-16T13:40:00.000Z"
+        },
+        "at": "2026-11-16T12:10:00.000Z",
+        "task": "T2"
+      }
+    },
+    {
+      "sha": "183af37aa3bd18abce78cb9184c1a7d83c8b3dbd",
+      "at": "2026-11-16T12:09:00.000Z",
+      "event": {
+        "v": 1,
+        "seq": 9,
+        "type": "task.merge",
+        "agent": "claude-a1f3",
+        "data": {
+          "sha": "9a89bc2621b4c45199d849b4940529847efe60be",
+          "mergeSha": "1fe89f8829772157ca1f6cc9521c59781f8c5d34"
+        },
+        "at": "2026-11-16T12:09:00.000Z",
+        "task": "T1"
+      }
+    },
+    {
+      "sha": "fa6abfd97b554836edc3adef3384a72bb5a42fbe",
+      "at": "2026-11-16T12:08:00.000Z",
+      "event": {
+        "v": 1,
+        "seq": 8,
+        "type": "review.verdict",
+        "agent": "codex-7k2p",
+        "data": {
+          "verdict": "approve",
+          "sha": "9a89bc2621b4c45199d849b4940529847efe60be",
+          "commentId": 1008
+        },
+        "at": "2026-11-16T12:08:00.000Z",
+        "task": "T1"
+      }
+    },
+    {
+      "sha": "2c0b36337f2b795927bf510edeb4ebda21c895de",
+      "at": "2026-11-16T12:07:00.000Z",
+      "event": {
+        "v": 1,
+        "seq": 7,
+        "type": "review.claim",
+        "agent": "codex-7k2p",
+        "data": {
+          "leaseUntil": "2026-11-16T13:07:00.000Z"
+        },
+        "at": "2026-11-16T12:07:00.000Z",
+        "task": "T1"
+      }
+    },
+    {
+      "sha": "06dfff0c32a53fdfa131c97f9813a6f20546b61d",
+      "at": "2026-11-16T12:06:00.000Z",
+      "event": {
+        "v": 1,
+        "seq": 6,
+        "type": "task.submit",
+        "agent": "claude-a1f3",
+        "data": {
+          "sha": "9a89bc2621b4c45199d849b4940529847efe60be"
+        },
+        "at": "2026-11-16T12:06:00.000Z",
+        "task": "T1"
+      }
+    },
+    {
+      "sha": "10e5f778b1350e07f387666f3ad87eebfbf25a4e",
+      "at": "2026-11-16T12:05:00.000Z",
+      "event": {
+        "v": 1,
+        "seq": 5,
+        "type": "task.verify",
+        "agent": "claude-a1f3",
+        "data": {
+          "sha": "9a89bc2621b4c45199d849b4940529847efe60be",
+          "ok": true,
+          "summary": "12 passed"
+        },
+        "at": "2026-11-16T12:05:00.000Z",
+        "task": "T1"
+      }
+    },
+    {
+      "sha": "f1e2698c81b595a08527ecaa34b93cc71c7bddf1",
+      "at": "2026-11-16T12:04:00.000Z",
+      "event": {
+        "v": 1,
+        "seq": 4,
+        "type": "task.push",
+        "agent": "claude-a1f3",
+        "data": {
+          "headSha": "9a89bc2621b4c45199d849b4940529847efe60be",
+          "touched": [
+            "src/truncate.js"
+          ],
+          "leaseUntil": "2026-11-16T13:34:00.000Z",
+          "subPr": 57
+        },
+        "at": "2026-11-16T12:04:00.000Z",
+        "task": "T1"
+      }
+    }
+  ],
+  "now": "2026-11-16T13:50:00.000Z"
+}

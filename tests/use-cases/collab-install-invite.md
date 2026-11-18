@@ -1,0 +1,16 @@
+# Use case: installing collab and inviting another agent
+
+Zach installs collab once. Later, with a collab running on PR #1, he asks for a Codex agent to help without opening Codex himself.
+
+1. He runs `node scripts/install.mjs`. It links the skill into `~/.claude/skills/collab`, into `~/.codex/skills/collab` (when Codex is installed) and into `~/.collab/skill`. It then writes the launcher `~/.collab/bin/collab.mjs` and the `collab` / `collab.cmd` shims, and records everything in `~/.collab/install.json`. Running it again changes nothing. `--uninstall` removes only what the manifest lists. `collab --version` works through the launcher.
+2. `collab doctor` checks Node, git, gh and the signed-in account, the launcher and the skill links, the claude and codex CLIs, and Codex's default model. It exits 5 when something required is missing.
+3. `collab invite codex --pr 1` mints an agent id, starts a relay pinned to that id, and launches `codex exec -C <repo>/.collab -s workspace-write --json -o <run>/last.md -`. The startup prompt goes in on stdin, and `COLLAB_AGENT` and `COLLAB_RELAY=1` are set. The invited Codex joins with the given id, and its collab calls go through the relay. Agent markers from Zach's own session (such as `CLAUDECODE`, `CODEX_THREAD_ID` or an IDE port) don't leak into it, but a keep list of his own setup for that tool does carry over (`CLAUDE_CODE_USE_BEDROCK` and `CLAUDE_CODE_OAUTH_TOKEN` to an invited Claude, `CODEX_HOME` and `CODEX_API_KEY` to an invited Codex), so the invited agent can sign in. Claude's credentials never go to Codex, or the reverse.
+4. `collab invite claude --task T2` launches `claude -p` with the invite's tool lists:
+   - allowed: the collab launcher by its absolute path (not any `node` command, since `node -e` could bypass the rest), read-only git, and file tools;
+   - denied: git push and commit, gh pr merge, gh api and gh repo.
+   The startup prompt tells it its id and to claim T2.
+5. Every invite stops by itself at its timeout (2 hours by default). A watchdog kills it, then runs `collab stop` for that run, which expires the agent's task leases so another agent can reclaim the work at once.
+6. `collab stop --pr 1`, run from Zach's own terminal, stops every invited agent on that PR. Inside an agent session it is refused like the other owner commands.
+7. If an invited agent's process exits early (it finished, crashed or was closed), the next collab command on this machine sees that and expires its task leases at once. Another agent can reclaim its work, or merge it if it was approved, without waiting out the 90-minute lease. Within a few seconds its watchdog notices as well: it runs `collab stop` for that run with the reason `exited`, which also stops its relay.
+8. `collab invite codex --pr 2` also works on a PR with no collab yet: the invited agent's `join` starts the collab and takes the planning lease, so it writes the plan. `--task` and `--review` are refused there, since there are no tasks yet.
+9. `collab invite claude --task T1` reserves T1 for the invited agent until the invite's timeout. Other agents' `next` skips it and says who it is reserved for, and their `claim T1` is refused. The invited agent's own `next` offers it first. `collab stop` frees it, and so does the next agent's housekeeping once the invited process has exited.

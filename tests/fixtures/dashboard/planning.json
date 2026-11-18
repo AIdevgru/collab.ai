@@ -1,0 +1,99 @@
+{
+  "ledger": {
+    "schema": 1,
+    "seq": 1,
+    "rev": null,
+    "pr": {
+      "repo": "o/r",
+      "number": 42,
+      "url": "https://github.com/o/r/pull/42",
+      "headRef": "feat/strings",
+      "baseRef": "main",
+      "defaultBranch": "main",
+      "ghLogin": "zwymer",
+      "mergeMethod": "squash"
+    },
+    "phase": "planning",
+    "planner": {
+      "agent": "claude-a1f3",
+      "leaseUntil": "2026-11-16T12:15:00.000Z"
+    },
+    "config": {
+      "leaseMin": 90,
+      "reviewLeaseMin": 60,
+      "planLeaseMin": 15,
+      "reviewAlertH": 2,
+      "maxTasks": 12,
+      "wip": 1,
+      "worktreeRoot": ".collab/wt",
+      "verifyCmd": null,
+      "setupCmd": null
+    },
+    "agents": {
+      "claude-a1f3": {
+        "tool": "claude",
+        "vendor": "anthropic",
+        "host": "pc",
+        "pid": null,
+        "joinedAt": "2026-11-16T12:00:00.000Z",
+        "lastSeen": "2026-11-16T12:00:00.000Z"
+      },
+      "codex-7k2p": {
+        "tool": "codex",
+        "vendor": "openai",
+        "host": "pc",
+        "pid": null,
+        "joinedAt": "2026-11-16T12:03:00.000Z",
+        "lastSeen": "2026-11-16T12:03:00.000Z"
+      }
+    },
+    "tasks": {},
+    "nextTask": 1,
+    "directives": [],
+    "lastCommentId": 0,
+    "lastCommentAt": null,
+    "notices": {}
+  },
+  "live": {
+    "mainCi": "SUCCESS",
+    "mainMergeable": "MERGEABLE",
+    "mainState": "OPEN",
+    "additions": 24,
+    "deletions": 3,
+    "mainHeadSha": "1822562e6f0f2444bd907e99197d5656c194d113",
+    "subs": {}
+  },
+  "history": [
+    {
+      "sha": "2a55964d5ec0ac9e2b22486378d3a165467f0009",
+      "at": "2026-11-16T12:03:00.000Z",
+      "event": {
+        "v": 1,
+        "seq": 1,
+        "type": "agent.join",
+        "agent": "codex-7k2p",
+        "data": {
+          "tool": "codex",
+          "host": "pc",
+          "pid": null
+        },
+        "at": "2026-11-16T12:03:00.000Z"
+      }
+    },
+    {
+      "sha": "c8f42264144e147fc8baa31a22a272fe3ded05bf",
+      "at": "2026-11-16T12:00:00.000Z",
+      "event": {
+        "v": 1,
+        "seq": 0,
+        "type": "init",
+        "agent": "claude-a1f3",
+        "data": {
+          "pr": 42
+        },
+        "at": "2026-11-16T12:00:00.000Z"
+      }
+    }
+  ],
+  "now": "2026-11-16T12:05:00.000Z"
+}

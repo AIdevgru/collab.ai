@@ -1,0 +1,19 @@
+# Use case: cross-vendor review and a safe merge
+
+Codex finished T1 and Claude reviews it.
+
+1. Codex runs `collab push T1`, which commits, pushes and opens a draft sub-PR into `feat/strings`. Then `collab verify T1` runs the test command from the default branch and records a pass at the head commit. Then `collab submit T1` marks the sub-PR ready, and T1 becomes `in_review`.
+2. Another Codex agent tries `collab review-claim T1` and is refused, because reviewers must come from a different vendor. Claude's `next` says `review T1`.
+3. Claude runs `review-claim`, reads the diff in a review worktree and runs `collab verify T1`. It then requests changes with a numbered list. T1 goes back to Codex. Codex's `next` says `fix T1` and prints the reviewer's notes, labelled as untrusted.
+4. Codex fixes, pushes and submits again, and Claude approves. The approval is tied to the head commit, so a push after approval sends T1 back to review. A push while Claude is still reviewing is caught too: `collab review` refuses, because Claude's checkout is the older commit, and `next` tells Claude to run `review-claim` again. Only then can it give a verdict on the new commit.
+5. `collab merge T1`:
+   - merges through the REST API with the approved SHA;
+   - refuses if the sub-PR's base isn't the PR branch, if it targets the default branch, or if it is the main PR;
+   - refuses while the sub-PR's CI is red or still running;
+   - with no checks at all, requires a passing `collab verify` at that SHA.
+6. When CI on the main PR goes red, merges freeze. collab opens one "Fix the failing CI" task, and no second one while that task is unfinished, even if the head moves while still red; that task can still merge. If CI turns green again before anyone claims it (a flaky run), the task is withdrawn (and its sub-PR closed, if an earlier claim opened one), so it never holds up Ready. If CI then goes red at the same commit again, the same task is reopened rather than a new one added.
+7. If GitHub merged a sub-PR but recording it in the ledger failed, the task still shows approved. Running `collab merge` again finds the sub-PR already merged and records it as done, with no second merge call.
+8. Each agent's `collab next` and `collab wait` remove its own clone's worktrees for finished tasks. A review worktree goes even if the reviewer left notes in it, since the review is already posted. A task worktree goes only when it has no uncommitted changes.
+9. A `--body-file` that does not exist is refused with exit 2 and the path it looked for, not reported as a collab bug.
+10. `collab verify` only counts for the pushed commit. If the task worktree holds changes that aren't pushed (an edit, or a new file), verify is refused and says to run `collab push` first; the review worktree is collab's own checkout, so a tracked file changed there is put back to the pushed commit before the tests run and never stops `review-claim` moving to a new commit. An agent that is neither the owner nor the reviewer can't verify at all.
+11. The reviewer reads the task's change with `collab diff T1` (`--stat` for a summary, or file names to narrow it), so it never needs raw `git`, which an invited Claude may not be allowed to run. `review-claim` names a notes file inside `.collab/` (`review-pr1-t1.md`), which every agent can write, a sandboxed Codex included. The name carries the PR number, so reviews of T1 on two PRs in one clone never overwrite each other.

@@ -1,0 +1,14 @@
+{
+  "name": "collab.ai",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "/collab: Claude, Codex, Gemini and Grok split, build and cross-review one GitHub PR, with a live status dashboard in the PR.",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "bin": { "collab": "skills/collab/bin/collab.mjs" },
+  "scripts": {
+    "test": "node --test \"tests/**/*.test.mjs\"",
+    "install-skill": "node scripts/install.mjs"
+  }
+}

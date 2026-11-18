@@ -1,0 +1,472 @@
+{
+  "ledger": {
+    "schema": 1,
+    "seq": 18,
+    "rev": null,
+    "pr": {
+      "repo": "o/r",
+      "number": 42,
+      "url": "https://github.com/o/r/pull/42",
+      "headRef": "feat/strings",
+      "baseRef": "main",
+      "defaultBranch": "main",
+      "ghLogin": "zwymer",
+      "mergeMethod": "squash"
+    },
+    "phase": "paused",
+    "planner": null,
+    "config": {
+      "leaseMin": 90,
+      "reviewLeaseMin": 60,
+      "planLeaseMin": 15,
+      "reviewAlertH": 2,
+      "maxTasks": 12,
+      "wip": 1,
+      "worktreeRoot": ".collab/wt",
+      "verifyCmd": null,
+      "setupCmd": null
+    },
+    "agents": {
+      "claude-a1f3": {
+        "tool": "claude",
+        "vendor": "anthropic",
+        "host": "pc",
+        "pid": null,
+        "joinedAt": "2026-11-16T12:00:00.000Z",
+        "lastSeen": "2026-11-16T13:10:00.000Z"
+      },
+      "codex-7k2p": {
+        "tool": "codex",
+        "vendor": "openai",
+        "host": "pc",
+        "pid": null,
+        "joinedAt": "2026-11-16T12:01:00.000Z",
+        "lastSeen": "2026-11-16T12:55:00.000Z"
+      }
+    },
+    "tasks": {
+      "T1": {
+        "title": "Add a truncate() helper",
+        "desc": "",
+        "accept": [
+          "truncate('hello', 3) returns 'he…'"
+        ],
+        "scope": [
+          "src/truncate.*"
+        ],
+        "deps": [],
+        "size": "S",
+        "kind": "work",
+        "status": "done",
+        "owner": "claude-a1f3",
+        "leaseUntil": null,
+        "branch": "collab/pr-42/t1",
+        "subPr": 57,
+        "headSha": "b4beaf98c3404fa13c95ca1bb97ed80fa40b621d",
+        "touched": [
+          "src/truncate.js"
+        ],
+        "reviewer": null,
+        "reviewLeaseUntil": null,
+        "reviews": [
+          {
+            "agent": "codex-7k2p",
+            "vendor": "openai",
+            "verdict": "approve",
+            "sha": "b4beaf98c3404fa13c95ca1bb97ed80fa40b621d",
+            "commentId": 1035,
+            "at": "2026-11-16T12:35:00.000Z"
+          }
+        ],
+        "verify": [
+          {
+            "sha": "b4beaf98c3404fa13c95ca1bb97ed80fa40b621d",
+            "by": "claude-a1f3",
+            "ok": true,
+            "summary": "12 passed",
+            "at": "2026-11-16T12:22:00.000Z"
+          }
+        ],
+        "blocked": null,
+        "merged": {
+          "sha": "b4beaf98c3404fa13c95ca1bb97ed80fa40b621d",
+          "at": "2026-11-16T12:40:00.000Z",
+          "by": "claude-a1f3",
+          "mergeSha": "fcb82e9731d5137d92658b3b36008088893568ad"
+        },
+        "changeRounds": 0,
+        "times": {
+          "created": "2026-11-16T12:02:00.000Z",
+          "claimed": "2026-11-16T12:03:00.000Z",
+          "submitted": "2026-11-16T12:23:00.000Z",
+          "done": "2026-11-16T12:40:00.000Z"
+        },
+        "reviewSha": "b4beaf98c3404fa13c95ca1bb97ed80fa40b621d"
+      },
+      "T2": {
+        "title": "Add a slugify() helper",
+        "desc": "",
+        "accept": [],
+        "scope": [
+          "src/slug.*"
+        ],
+        "deps": [],
+        "size": "S",
+        "kind": "work",
+        "status": "in_review",
+        "owner": "codex-7k2p",
+        "leaseUntil": "2026-11-16T14:20:00.000Z",
+        "branch": "collab/pr-42/t2",
+        "subPr": 58,
+        "headSha": "c0abacd603340e8dfbb1f76e0af4a538bcc697ed",
+        "touched": [
+          "src/slug.js"
+        ],
+        "reviewer": "claude-a1f3",
+        "reviewLeaseUntil": "2026-11-16T13:58:00.000Z",
+        "reviews": [],
+        "verify": [
+          {
+            "sha": "c0abacd603340e8dfbb1f76e0af4a538bcc697ed",
+            "by": "codex-7k2p",
+            "ok": true,
+            "summary": "12 passed",
+            "at": "2026-11-16T12:52:00.000Z"
+          }
+        ],
+        "blocked": null,
+        "merged": null,
+        "changeRounds": 0,
+        "times": {
+          "created": "2026-11-16T12:02:00.000Z",
+          "claimed": "2026-11-16T12:04:00.000Z",
+          "submitted": "2026-11-16T12:55:00.000Z",
+          "done": null
+        },
+        "reviewSha": "c0abacd603340e8dfbb1f76e0af4a538bcc697ed"
+      },
+      "T3": {
+        "title": "Document the string helpers",
+        "desc": "",
+        "accept": [],
+        "scope": [
+          "docs/**"
+        ],
+        "deps": [
+          "T1"
+        ],
+        "size": "S",
+        "kind": "work",
+        "status": "open",
+        "owner": null,
+        "leaseUntil": null,
+        "branch": "collab/pr-42/t3",
+        "subPr": null,
+        "headSha": null,
+        "touched": [],
+        "reviewer": null,
+        "reviewLeaseUntil": null,
+        "reviews": [],
+        "verify": [],
+        "blocked": null,
+        "merged": null,
+        "changeRounds": 0,
+        "times": {
+          "created": "2026-11-16T12:02:00.000Z",
+          "claimed": null,
+          "submitted": null,
+          "done": null
+        }
+      },
+      "T4": {
+        "title": "Add a padStart() wrapper",
+        "desc": "",
+        "accept": [],
+        "scope": [
+          "src/pad.*"
+        ],
+        "deps": [],
+        "size": "S",
+        "kind": "work",
+        "status": "claimed",
+        "owner": "claude-a1f3",
+        "leaseUntil": "2026-11-16T14:40:00.000Z",
+        "branch": "collab/pr-42/t4",
+        "subPr": 59,
+        "headSha": "3ce7dab6e65c1092f545744f22f0b43dbb8b4d58",
+        "touched": [
+          "src/pad.js"
+        ],
+        "reviewer": null,
+        "reviewLeaseUntil": null,
+        "reviews": [],
+        "verify": [],
+        "blocked": null,
+        "merged": null,
+        "changeRounds": 0,
+        "times": {
+          "created": "2026-11-16T12:02:00.000Z",
+          "claimed": "2026-11-16T12:42:00.000Z",
+          "submitted": null,
+          "done": null
+        }
+      },
+      "T5": {
+        "title": "Export the helpers from index.js",
+        "desc": "",
+        "accept": [],
+        "scope": [
+          "src/index.js"
+        ],
+        "deps": [
+          "T1",
+          "T2"
+        ],
+        "size": "S",
+        "kind": "work",
+        "status": "cancelled",
+        "owner": null,
+        "leaseUntil": null,
+        "branch": "collab/pr-42/t5",
+        "subPr": null,
+        "headSha": null,
+        "touched": [],
+        "reviewer": null,
+        "reviewLeaseUntil": null,
+        "reviews": [],
+        "verify": [],
+        "blocked": null,
+        "merged": null,
+        "changeRounds": 0,
+        "times": {
+          "created": "2026-11-16T12:02:00.000Z",
+          "claimed": null,
+          "submitted": null,
+          "done": null
+        }
+      }
+    },
+    "nextTask": 6,
+    "directives": [
+      {
+        "commentId": 2001,
+        "login": "zwymer",
+        "cmd": "cancel",
+        "at": "2026-11-16T13:12:00.000Z",
+        "applied": true,
+        "task": "T5",
+        "url": "https://github.com/o/r/pull/42#issuecomment-2001"
+      },
+      {
+        "commentId": 2002,
+        "login": "zwymer",
+        "cmd": "pause",
+        "at": "2026-11-16T13:15:00.000Z",
+        "applied": true,
+        "url": "https://github.com/o/r/pull/42#issuecomment-2002"
+      }
+    ],
+    "lastCommentId": 2002,
+    "lastCommentAt": null,
+    "notices": {}
+  },
+  "live": {
+    "mainCi": "SUCCESS",
+    "mainMergeable": "MERGEABLE",
+    "mainState": "OPEN",
+    "additions": 412,
+    "deletions": 58,
+    "mainHeadSha": "1822562e6f0f2444bd907e99197d5656c194d113",
+    "subs": {
+      "T2": {
+        "state": "OPEN",
+        "merged": false,
+        "ci": "SUCCESS",
+        "mergeable": "MERGEABLE",
+        "headSha": "c0abacd603340e8dfbb1f76e0af4a538bcc697ed",
+        "draft": false
+      },
+      "T4": {
+        "state": "OPEN",
+        "merged": false,
+        "ci": "PENDING",
+        "mergeable": "MERGEABLE",
+        "headSha": "3ce7dab6e65c1092f545744f22f0b43dbb8b4d58",
+        "draft": true
+      }
+    }
+  },
+  "history": [
+    {
+      "sha": "9415393f2e720c7d74646bb740fbe078881f00a9",
+      "at": "2026-11-16T13:15:00.000Z",
+      "event": {
+        "v": 1,
+        "seq": 18,
+        "type": "directive",
+        "agent": "owner",
+        "data": {
+          "commentId": 2002,
+          "login": "zwymer",
+          "cmd": "pause",
+          "url": "https://github.com/o/r/pull/42#issuecomment-2002"
+        },
+        "at": "2026-11-16T13:15:00.000Z"
+      }
+    },
+    {
+      "sha": "fb324914820c19a4b4bbe58799e3a83ef53347ec",
+      "at": "2026-11-16T13:12:00.000Z",
+      "event": {
+        "v": 1,
+        "seq": 17,
+        "type": "directive",
+        "agent": "owner",
+        "data": {
+          "commentId": 2001,
+          "login": "zwymer",
+          "cmd": "cancel",
+          "url": "https://github.com/o/r/pull/42#issuecomment-2001"
+        },
+        "at": "2026-11-16T13:12:00.000Z",
+        "task": "T5"
+      }
+    },
+    {
+      "sha": "863c6d7501c05a6255f8187252058b2b2cf9ce09",
+      "at": "2026-11-16T13:10:00.000Z",
+      "event": {
+        "v": 1,
+        "seq": 16,
+        "type": "task.push",
+        "agent": "claude-a1f3",
+        "data": {
+          "headSha": "3ce7dab6e65c1092f545744f22f0b43dbb8b4d58",
+          "touched": [
+            "src/pad.js"
+          ],
+          "leaseUntil": "2026-11-16T14:40:00.000Z",
+          "subPr": 59
+        },
+        "at": "2026-11-16T13:10:00.000Z",
+        "task": "T4"
+      }
+    },
+    {
+      "sha": "294b2d410e7d583cc3ce757994d32f8d1cc3656c",
+      "at": "2026-11-16T12:58:00.000Z",
+      "event": {
+        "v": 1,
+        "seq": 15,
+        "type": "review.claim",
+        "agent": "claude-a1f3",
+        "data": {
+          "leaseUntil": "2026-11-16T13:58:00.000Z"
+        },
+        "at": "2026-11-16T12:58:00.000Z",
+        "task": "T2"
+      }
+    },
+    {
+      "sha": "e3ef794536cd37b6dac1ed414c6a6362dcca8d9d",
+      "at": "2026-11-16T12:55:00.000Z",
+      "event": {
+        "v": 1,
+        "seq": 14,
+        "type": "task.submit",
+        "agent": "codex-7k2p",
+        "data": {
+          "sha": "c0abacd603340e8dfbb1f76e0af4a538bcc697ed"
+        },
+        "at": "2026-11-16T12:55:00.000Z",
+        "task": "T2"
+      }
+    },
+    {
+      "sha": "93fae14dae1515d0f449a5846ffa8c484f34dd7d",
+      "at": "2026-11-16T12:52:00.000Z",
+      "event": {
+        "v": 1,
+        "seq": 13,
+        "type": "task.verify",
+        "agent": "codex-7k2p",
+        "data": {
+          "sha": "c0abacd603340e8dfbb1f76e0af4a538bcc697ed",
+          "ok": true,
+          "summary": "12 passed"
+        },
+        "at": "2026-11-16T12:52:00.000Z",
+        "task": "T2"
+      }
+    },
+    {
+      "sha": "c2cafdce662fede2f251591b8546ac691d072807",
+      "at": "2026-11-16T12:50:00.000Z",
+      "event": {
+        "v": 1,
+        "seq": 12,
+        "type": "task.push",
+        "agent": "codex-7k2p",
+        "data": {
+          "headSha": "c0abacd603340e8dfbb1f76e0af4a538bcc697ed",
+          "touched": [
+            "src/slug.js"
+          ],
+          "leaseUntil": "2026-11-16T14:20:00.000Z",
+          "subPr": 58
+        },
+        "at": "2026-11-16T12:50:00.000Z",
+        "task": "T2"
+      }
+    },
+    {
+      "sha": "5dcee5d92eaf8b2b0f5cf6c8b1e04721d4504e85",
+      "at": "2026-11-16T12:42:00.000Z",
+      "event": {
+        "v": 1,
+        "seq": 11,
+        "type": "task.claim",
+        "agent": "claude-a1f3",
+        "data": {
+          "leaseUntil": "2026-11-16T14:12:00.000Z"
+        },
+        "at": "2026-11-16T12:42:00.000Z",
+        "task": "T4"
+      }
+    },
+    {
+      "sha": "3f26e0a40aed51492edd31b0fab803e9dee6a573",
+      "at": "2026-11-16T12:40:00.000Z",
+      "event": {
+        "v": 1,
+        "seq": 10,
+        "type": "task.merge",
+        "agent": "claude-a1f3",
+        "data": {
+          "sha": "b4beaf98c3404fa13c95ca1bb97ed80fa40b621d",
+          "mergeSha": "fcb82e9731d5137d92658b3b36008088893568ad"
+        },
+        "at": "2026-11-16T12:40:00.000Z",
+        "task": "T1"
+      }
+    },
+    {
+      "sha": "a67962c457ebbbca11a6fc7a5c4bce2e06af3db9",
+      "at": "2026-11-16T12:35:00.000Z",
+      "event": {
+        "v": 1,
+        "seq": 9,
+        "type": "review.verdict",
+        "agent": "codex-7k2p",
+        "data": {
+          "verdict": "approve",
+          "sha": "b4beaf98c3404fa13c95ca1bb97ed80fa40b621d",
+          "commentId": 1035
+        },
+        "at": "2026-11-16T12:35:00.000Z",
+        "task": "T1"
+      }
+    }
+  ],
+  "now": "2026-11-16T13:20:00.000Z"
+}
