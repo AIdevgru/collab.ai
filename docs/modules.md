@@ -279,6 +279,138 @@ export function codexModel(home) -> string | null          // `model` from ~/.co
 - **Review:** `collab review` applies the `review.verdict` event to the ledger in memory before posting the review comment, so a verdict the reducer would refuse never reaches GitHub.
 - **Notices:** `needs-owner:T<n>:<blocked.since>` (one per question), `ready` and `sticky` comments carry `<!-- collab:notice key=… -->`. They are deduped through `ledger.notices` plus a search for the marker. Needs-owner notices go out even when the renderer is broken.
 
+## Plan sessions (`collab plan <sub>`; see design.md "Plan sessions")
+A plan session is a GitHub issue labelled `collab-plan` plus the ledger on `refs/collab/plan-<issue#>`. Each person acts as their own pinned GitHub login. Text written by people or agents (plan text, summaries, comments, diffs) is untrusted data everywhere.
+
+### store.mjs: ref kinds and extra tree files
+```js
+export const KINDS = ["pr", "plan"];
+export const refFor = (n, kind = "pr") => `refs/collab/${kind}-${n}`;
+export const cacheRefFor = (agent, n, kind = "pr") => `refs/collab-cache/${agent ?? "anon"}/${kind}-${n}`;
+// read, write, history and remove take kind = "pr" (an unknown kind -> CollabError(BUG)). Messages say "PR 42" or "plan 57".
+// write's mutate may return { ledger, events, files }: files = { [name]: blobOid } adds one `100644 blob <oid>\t<name>` line
+//   per entry to mktree, next to ledger.json. Names match /^[A-Za-z0-9][A-Za-z0-9._-]*$/ and are not "ledger.json",
+//   else CollabError(BUG). Nothing is carried over from the parent tree: the caller passes the full map each write.
+//   Without files the tree is exactly { ledger.json }, as before.
+export function list({ cwd, agent, auth, kind }) -> [{ n, ledger, rev }]   // numeric order
+//   git fetch --prune --no-tags --no-write-fetch-head origin +refs/collab/<kind>-*:refs/collab-cache/<agent>/<kind>-*,
+//   then each cache ref's ledger.json. A ref whose ledger can't be parsed is skipped.
+```
+`remove` deletes this clone's `refs/collab-cache/*/<kind>-<n>`.
+
+### git.mjs additions
+```js
+export function normText(s) -> string           // "\r\n" and "\r" -> "\n", a leading BOM dropped, exactly one trailing "\n" ("" stays "")
+export function hashText(cwd, text) -> oid       // hash-object -w --stdin of normText(text); no filters
+export function blobText(cwd, oid) -> string     // cat-file blob <oid>
+export function diffBlobs(cwd, a, b) -> string   // unified diff of two blob ids (git diff --no-color --no-ext-diff -U2 a b), header lines up to the first @@ dropped; "" when equal
+export function mergeText(cwd, { ours, base, theirs, labels: [ours, base, theirs] }) -> { clean, text, conflicts }
+   // git merge-file -p --diff3 --object-id -L … -L … -L … <ours> <base> <theirs>; exit 0 clean; 1-127 = conflict count
+   // (text holds the markers); 129 -> CollabError(ENV, "plan sessions need git 2.43 or newer"); any other code > 127 -> ENV.
+   // Returned text is normText()ed.
+export function commitFileOnto(cwd, { base, path, text, message, author }) -> commit sha
+   // base = a commit-ish; builds a tree = base's tree + path:=text with a temporary GIT_INDEX_FILE (read-tree, update-index
+   // --add --cacheinfo 100644,<oid>,<path>, write-tree), then commit-tree -p <base>. author = { name, email }; date = clock.iso().
+   // Never touches the working tree, HEAD or the real index.
+export function gitVersion() -> [major, minor, patch] | null
+```
+
+### github.mjs additions (all through `api()`)
+```js
+export function getIssue(repo, n, { auth }) -> { number, state: "OPEN"|"CLOSED", stateReason, locked, title, body, labels: [names], url, isPr, author }
+   // isPr = the REST issue has a pull_request field
+export function createIssue(repo, { title, body, labels = [] }, { auth }) -> { number, url }
+export function patchIssue(repo, n, { title, body, state, stateReason }, { auth })   // only the given keys are sent (state_reason)
+export function closeIssue(repo, n, { reason = "completed" } = {}, { auth })
+export function listIssues(repo, { label, state = "open" }, { auth }) -> [{ number, title, url, state, updatedAt, author }]
+   // GET issues?labels=&state=&per_page=100 --paginate; entries with pull_request are dropped
+export function ensureLabel(repo, name, { color = "5319e7", description = "" } = {}, { auth }) -> "exists"|"created"|"forbidden"
+   // GET labels/<name>; 404 -> POST labels; 422 on POST (created meanwhile) -> "exists"; 403 -> "forbidden" (never throws for 403)
+```
+
+### pr.mjs additions
+```js
+export function parseIssueRef(arg, defaultRepo) -> { repo, number }   // https://github.com/o/r/issues/57 (and /pull/57), o/r#57, #57, 57
+export function splice(body, block, seq, at, { name = "dashboard" } = {})   // markers <!-- collab:<name>:start seq=N at=… --> / <!-- collab:<name>:end -->
+export function readMarker(body, { name = "dashboard" } = {}) -> { seq, at } | null
+export function readBlock(body, { name }) -> { seq, at, text } | null   // text between the markers, line endings normalised to \n, outer blank lines trimmed
+export function markedBlock(name, seq, at, content) -> string            // start marker + \n + content + \n + end marker
+```
+The `name` default keeps every dashboard caller unchanged. The block-holds-markers check refuses any `<!-- collab:<name>:` inside the block.
+
+### plan-ledger.mjs (pure reducer)
+- **Exports:** `SCHEMA = 1`, `PHASES = ["drafting", "agreed", "handed-off", "closed"]`, `MAX_CHARS = 50000`, `newPlanLedger`, `apply`, `activePeople`, `consensus`, `personOf`, `isOwner`, `stateKey`, `EVENT_TYPES`.
+- **Constructor:** `newPlanLedger({ issue, owner, agent: { id, tool, host }, minPeople = 2, rev1: { hash, blob, chars, summary }, now, lastCommentId = 0, lastCommentAt = null })` returns `seq: 0, rev: null`, `phase: "drafting"`, `current: 1`, `revs: { "1": { …rev1, base: 0, merged: false, agent, login: owner, at } }`, the owner registered as a person and the agent registered under the owner's login. `issue = { repo, number, url, title, defaultBranch }`.
+- **Shape:**
+```jsonc
+{ "schema": 1, "kind": "plan", "seq": 0, "rev": null,
+  "issue": { "repo", "number", "url", "title", "defaultBranch" },
+  "owner": "zwymer", "phase": "drafting", "current": 1, "minPeople": 2, "maxChars": 50000,
+  "revs": { "1": { "hash": "sha256:<hex>", "blob": "<oid>", "base": 0, "merged": false, "agent": "claude-a1f3", "login": "zwymer", "summary": "…", "chars": 0, "at": "…" } },
+  "people": { "zwymer": { "joinedAt": "…", "lastSeen": "…", "observer": false, "left": null, "removed": null } },
+  "agents": { "claude-a1f3": { "tool": "claude", "vendor": "anthropic", "login": "zwymer", "host": "…", "joinedAt": "…", "lastSeen": "…" } },
+  "agreements": { "zwymer": { "rev": 1, "hash": "…", "at": "…", "via": "agent:claude-a1f3", "commentId": 0, "url": null } },
+  "directives": [], "lastCommentId": 0, "lastCommentAt": null, "notices": {},
+  "handoff": null, "agreedAt": null, "closed": null }
+```
+- **Reducer:** `apply(ledger, event)` returns a new ledger and never mutates its input; `seq = ledger.seq + 1`. `event = { type, login, agent?, data, at }`.
+- **Active person:** in `people`, not `observer`, `left` and `removed` both null. `activePeople(ledger)` returns them sorted.
+- **Owner operations** (`person.remove`, `reopen`, `state.set`) are allowed when `event.login === ledger.owner`, or `event.data.asAdmin === true` (the CLI sets it after checking admin permission).
+- **Refusal order:** schema mismatch → ENV; no type, no valid `at` or no `login` → BUG; unknown type → PRECONDITION; for every type except `plan.join`, `directive`, `comments.seen` and `notice.sent`, the login must be in `people` and an `agent`, when given, must be registered under that login → PRECONDITION; phase `closed` → UNSUPPORTED except `comments.seen`, `notice.sent`, `agent.seen`, `directive`; phase `agreed`/`handed-off` (frozen) → PRECONDITION for `rev.add`, `agree`, `agree.withdraw`, `person.leave`, `person.remove`. Messages name the actor and why: `alice can't agree to revision 2: revision 3 is current`. `details = { type, login, agent }`.
+- **Consensus:** after `agree`, `person.leave` and `person.remove`: when `activePeople.length >= minPeople` and every active person has an agreement whose `rev === current` and `hash === revs[current].hash`, `phase = "agreed"` and `agreedAt = event.at`. `consensus(ledger)` returns `{ agreed, waitingOn: [login], agreedBy: [login], needMore }` (`needMore` = people still to join to reach `minPeople`).
+- **`stateKey(ledger)`** returns a string that changes whenever `current`, `phase`, any agreement, or any person's status changes (not `lastSeen`). Agents compare it with their local seen state.
+
+| Type | `data` fields | Rule |
+|---|---|---|
+| `plan.join` | `{ tool, host }` | `event.agent` is required. A new login becomes a person (`observer: true` while frozen). A known agent with another login, or another tool, is refused. Rejoining clears `left`; a `removed` person is refused. The agent's vendor comes from `VENDORS` in ledger.mjs. |
+| `agent.seen` | `{}` | Updates the agent's and person's `lastSeen`. |
+| `rev.add` | `{ rev, hash, blob, base, merged, summary, chars }` | Drafting only; an active person; `rev === current + 1`; `1 <= base <= current`; `chars <= maxChars`; `hash` matches `/^sha256:[0-9a-f]{64}$/`; `blob` is 40 or 64 hex. Sets `revs[rev]`, `current = rev`, clears `agreements`, updates `lastSeen`. |
+| `agree` | `{ rev, hash, via, commentId?, url? }` | Drafting; an active person; `rev === current`; `hash === revs[current].hash`. Sets `agreements[login]`. |
+| `agree.withdraw` | `{}` | Drafting; deletes `agreements[login]` (refused when there is none). |
+| `person.leave` | `{}` | Drafting; not the owner; sets `left = at` and deletes the agreement. |
+| `person.remove` | `{ target, reason, asAdmin? }` | Drafting; owner operation; `target` is a person, not the owner and not already removed. Sets `removed = { by, at, reason }`, deletes the agreement. |
+| `reopen` | `{ asAdmin? }` | Owner operation; only from `agreed`. Back to `drafting`; clears `agreements` and `agreedAt`; observers become active. |
+| `handoff` | `{ pr, url, branch, path, rev, hash }` | Any active person; only from `agreed`; `rev === current`, `hash` matches. `phase = "handed-off"`, sets `handoff = { …data, by: login, at }`. |
+| `state.set` | `{ phase: "closed", reason, asAdmin? }` | Owner operation; `closed` is final; sets `closed = { by, at, reason }`. |
+| `directive` | `{ commentId, commentAt?, cmd, rev?, hashPrefix?, url?, applied, why? }` | Audit record of a `/collab` comment by `event.login`. Refused when `commentId <= lastCommentId`. Appended to `directives`; sets `lastCommentId` (and `lastCommentAt`). |
+| `comments.seen` | `{ lastCommentId, lastCommentAt? }` | Only moves forward. |
+| `notice.sent` | `{ key, commentId }` | Sets `notices[key]`. |
+
+### plan-next.mjs (pure)
+```js
+export function planNext(ledger, me, seen, { issueState = "OPEN", newComments = 0, number } = {}) -> {
+  action: "closed"|"join"|"removed"|"read"|"agreed"|"handed-off"|"wait", why, cmd: ["collab", "plan", sub, "<n>", "--agent", me] | [] }
+```
+`seen` is the agent's local `{ key, commentId }` (or null). First match wins:
+1. `closed`: `phase === "closed"` or `issueState === "CLOSED"`. `cmd: []`.
+2. `join` (me not in `agents`); `removed` (my person was removed); `cmd` is `plan join <n>` or `[]`.
+3. `read`: `seen` is null, `seen.key !== stateKey(ledger)`, or `newComments > 0`. `cmd: plan show <n>`.
+4. `handed-off`: why names the PR URL. `cmd: []`.
+5. `agreed`: why says everyone agreed to revision N; `cmd: plan handoff <n>`.
+6. `wait`: why names who hasn't agreed yet (or how many people are still needed). `cmd: plan wait <n>`.
+
+### plan-render.mjs (pure)
+```js
+export function status(ledger) -> { key, emoji, label }   // drafting ⚪ Drafting | waiting 🟡 Waiting on agreement (someone agreed) |
+                                                          // agreed ✅ Agreed | handed-off 🚀 Handed off | closed ⚫ Closed
+export function renderStatus(ledger, now, { browserEdit = false } = {}) -> markdown   // the issue's status block, without markers
+export function revisionComment(ledger, rev, diff, { prefix }) -> markdown              // "📝 Revision 3 by …: <summary>" + capped diff in <details>
+export function agreeComment(ledger, login, { rev, hash, via }) -> markdown             // carries <!-- collab:plan-agree login=… rev=… hash=… -->
+export function noticeComment(key, text) -> markdown                                    // "<!-- collab:notice key=… -->\n" + text
+export function messagePrefix(ledger, agent) -> string                                  // "🤖 alice's Claude (claude-x9):"
+export function quietMentions(text, logins) -> string    // `@x` for logins that aren't people in the session, so they aren't notified
+export { lint } from "./dashboard.mjs";
+```
+- **Status block:** `## Plan session: <emoji> <label> (revision N, as of <UTC>)`. Then a sentence on what's needed (every person below agrees to the same revision, at least `minPeople`), "Waiting on: …" or "Everyone agreed to revision N on <UTC>." Then a people table (Person, Agents, Agreed to, How, Last active), the join line (`/collab plan <n>` in Claude Code, `$collab plan <n>` in Codex, `collab prompt plan <n>` for other agents), and the browser agree line `` `/collab agree r<N> <first 8 hex of the hash>` ``. When `browserEdit`, a "⚠️ Warning:" line says the plan section was edited in the browser and stays until the next revision. When handed off, a link to the PR. A footer says the plan below is replaced by each new revision.
+- Every string from people or agents goes through the dashboard's escaping rules (one line, `\`, `` ` ``, `*`, `_`, `[`, `]`, `|` escaped, `<` → `&lt;`); only `https://` URLs are linked; `lint(renderStatus(…))` is `[]`.
+- Golden files live in `tests/fixtures/plan/`; `UPDATE_GOLDEN=1` regenerates them.
+
+### plan-cli.mjs
+`planSession(ctx, helpers)` handles `collab plan <sub>`; `cli.mjs` passes `{ auth, pin, inputPath, readTextFile, ev, mainRoot }` so there is no import cycle. `loadPlan` / `commitPlan` replace `load` / `commit` (which read `ledger.pr`). `auth(ctx)` is called without a ledger login: each clone acts as its own login.
+- **Local files** (the CLI picks every path; all under `<root>/.collab/plans/<n>/`): `draft.md` and `draft.base` (from `pull`), `draft.conflict.md`, `seen-<agent>.json` (`{ key, commentId }`).
+- **Issue body:** a `plan-status` block (seq = ledger seq) then a `plan-doc` block (seq = revision). The doc block is rewritten only when its marker's seq is older than `current`; when its text differs from `r<current>` at the same seq (a browser edit), it stays, a `browser-edit:r<N>` notice goes out once, and the status block warns.
+- **Relay:** `relay.validate` allows `plan` with no subcommand or with `list new join pull show edit say agree leave next wait status handoff`; `close`, `remove`, `reopen` and anything else get exit 2.
+
 ## Fakes for tests (`tests/helpers/`)
 - `bare-remote.mjs`: `makeRepo()` returns `{ dir, remote, clone(name) -> path, cleanup() }` in a temp folder. Each clone sets `user.name`/`user.email`, `core.autocrlf=false` and no auto gc. The first clone pushes an initial commit (`README.md`) to `main` and a `feat/x` branch with one more commit (`src/x.txt`). Also exports `sh(args, cwd)`, a throwing git runner for assertions.
 - `race-worker.mjs`: `node race-worker.mjs <clone> <agent> <rounds> <pr>` increments a `{ seq, counter, log }` ledger `rounds` times through `store.write`; used by `tests/unit/store-race.test.mjs`.
@@ -291,3 +423,11 @@ export function codexModel(home) -> string | null          // `model` from ~/.co
 - `clock.mjs`: `withNow(iso, fn)`.
 - `cli-env.mjs`: `setup()` builds a bare remote, clones, the fake gh pointed at that remote, and a temp `COLLAB_HOME`. It returns `run(clone, argv, env)` / `runAsync` / `json` / `as(clone, agentId, argv)` / `start(tasks, tools)` / `idOf(result)`, which drive the real CLI with agent env vars stripped. The use-case tests use it.
 - `fake-agent.mjs`: stands in for `claude`/`codex` under `invite`. It records argv, env and the stdin prompt to `FAKE_AGENT_LOG/<id>.json`, runs the `FAKE_AGENT_ACTIONS` collab commands (with `__ID__` replaced by its id), then idles until killed.
+- **Plan sessions in the fakes:**
+  - `fake-gh` keeps issues in `issues: { "o/r#57": { title, body, state: "open"|"closed", stateReason, locked, labels: [names], author, updatedAt } }` and labels in `repos[x].labels: [{ name, color, description }]`.
+  - Routes: `POST issues`, `GET issues` (PRs included, as GitHub does, each with a `pull_request` field), `GET/PATCH issues/:n`, `POST issues/:n/labels`, `GET labels/:name`, `POST labels`.
+  - Issue and PR numbers come from one counter, comments work on issues, and comment URLs use `/issues/` for an issue.
+- `cli-env.setup({ people })` (for example `{ alice: "write", bob: "read" }`) adds collaborators and tokens (`tok-<login>`).
+  - `person(login)` returns a clone named after the login, with `collab.login` pinned.
+  - `browserComment(login, n, body)` posts a comment as that login straight into the fake state.
+  - `browserEdit(n, fn)` replaces an issue body with `fn(body)`, the way a browser edit would (CRLF line endings).

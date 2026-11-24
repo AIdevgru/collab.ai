@@ -165,7 +165,7 @@ function checkRepo(repo) {
 
 function checkNumber(n) {
   const v = Number(n);
-  if (!Number.isInteger(v) || v <= 0) throw new CollabError(EXIT.PRECONDITION, `not a PR or comment number: "${n}"`);
+  if (!Number.isInteger(v) || v <= 0) throw new CollabError(EXIT.PRECONDITION, `not a PR, issue or comment number: "${n}"`);
   return v;
 }
 
@@ -398,5 +398,87 @@ export function branchProtected(repo, branch, { auth } = {}) {
     return typeof r?.protected === "boolean" ? r.protected : null;
   } catch {
     return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Issues and labels (plan sessions)
+
+const labelNames = (labels) => (Array.isArray(labels) ? labels : []).map((l) => (typeof l === "string" ? l : l?.name)).filter((l) => typeof l === "string" && l);
+const openOrClosed = (state) => (String(state ?? "").toUpperCase() === "OPEN" ? "OPEN" : "CLOSED");
+
+function checkLabel(name) {
+  if (typeof name !== "string" || !name.trim()) throw new CollabError(EXIT.PRECONDITION, `not a label name: "${name}"`);
+  return name;
+}
+
+function issueOf(i) {
+  return {
+    number: i.number,
+    state: openOrClosed(i.state),
+    stateReason: i.state_reason ?? null,
+    locked: Boolean(i.locked),
+    title: i.title ?? "",
+    body: i.body ?? "",
+    labels: labelNames(i.labels),
+    url: i.html_url ?? null,
+    isPr: Boolean(i.pull_request),
+    author: i.user?.login ?? null,
+  };
+}
+
+// GitHub's issues API answers for PRs too; isPr says which one this is.
+export function getIssue(repo, n, { auth } = {}) {
+  return issueOf(api("GET", `repos/${checkRepo(repo)}/issues/${checkNumber(n)}`, { auth }));
+}
+
+export function createIssue(repo, { title, body, labels = [] } = {}, { auth } = {}) {
+  const r = api("POST", `repos/${checkRepo(repo)}/issues`, { body: { title: String(title ?? ""), body: body ?? "", labels: labelNames(labels) }, auth });
+  return { number: r.number, url: r.html_url };
+}
+
+// Sends only the keys given (stateReason as state_reason) and returns the issue as getIssue does.
+export function patchIssue(repo, n, { title, body, state, stateReason } = {}, { auth } = {}) {
+  const payload = {};
+  if (title !== undefined) payload.title = title;
+  if (body !== undefined) payload.body = body;
+  if (state !== undefined) payload.state = String(state).toLowerCase();
+  if (stateReason !== undefined) payload.state_reason = stateReason;
+  return issueOf(api("PATCH", `repos/${checkRepo(repo)}/issues/${checkNumber(n)}`, { body: payload, auth }));
+}
+
+// reason: "completed" or "not_planned".
+export function closeIssue(repo, n, { reason = "completed" } = {}, { auth } = {}) {
+  return patchIssue(repo, n, { state: "closed", stateReason: reason }, { auth });
+}
+
+// Issues (not PRs: the REST list holds both) with `label`, oldest page first as GitHub sends them.
+export function listIssues(repo, { label, state = "open" } = {}, { auth } = {}) {
+  const fields = { state, per_page: 100 };
+  if (label !== undefined && label !== null) fields.labels = checkLabel(label);
+  const list = api("GET", `repos/${checkRepo(repo)}/issues`, { fields, auth, paginate: true }) ?? [];
+  return list
+    .filter((i) => !i.pull_request)
+    .map((i) => ({ number: i.number, title: i.title ?? "", url: i.html_url ?? null, state: openOrClosed(i.state), updatedAt: i.updated_at ?? null, author: i.user?.login ?? null }));
+}
+
+// "exists", "created" (it was missing and this login made it) or "forbidden" (missing, and this
+// login can't make labels). Never throws for HTTP 403.
+export function ensureLabel(repo, name, { color = "5319e7", description = "" } = {}, { auth } = {}) {
+  const path = `repos/${checkRepo(repo)}/labels`;
+  try {
+    api("GET", `${path}/${encodeURIComponent(checkLabel(name))}`, { auth });
+    return "exists";
+  } catch (e) {
+    if (e?.details?.status === 403) return "forbidden";
+    if (e?.details?.status !== 404) throw e;
+  }
+  try {
+    api("POST", path, { body: { name, color: String(color).replace(/^#/, ""), description: String(description ?? "") }, auth });
+    return "created";
+  } catch (e) {
+    if (e?.details?.status === 422) return "exists"; // someone made it meanwhile
+    if (e?.details?.status === 403) return "forbidden";
+    throw e;
   }
 }

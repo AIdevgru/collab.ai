@@ -292,6 +292,40 @@ Codex's default `workspace-write` sandbox on Windows can edit files in its works
 - **At Ready for owner review**, the body block collapses to one line, "🔵 Ready for owner review: final collab report", linking to a final-report comment that holds the full dashboard. A squash merge then never copies the dashboard into main's commit message.
 - **Event comments:** "Needs owner" and "Ready for owner review" each post one marker comment (`<!-- collab:notice … -->`), deduped by searching for the marker. These notify other stakeholders. GitHub never notifies the owner of their own account's comments; the v1.1 Action will fix that.
 
+## Plan sessions (`/collab plan`)
+People agree on *what* to build before agents build it. Each person uses their own GitHub account and their own agent. The skill's steps are in `skills/collab/PLAN.md`, and the module contracts are in `docs/modules.md` under "Plan sessions".
+
+- **Where it lives:**
+  - The session is a GitHub issue labelled `collab-plan`. The label is only a hint: sessions are found through their refs.
+  - State and history live on `refs/collab/plan-<issue#>`. Its tree holds `ledger.json`, `plan.md` (the current revision) and one `r<N>.md` per revision. Issues and PRs share one number counter, so this never clashes with `refs/collab/pr-<n>`.
+  - The issue body is two marked blocks: `collab:plan-status` (the state, a people table, who it's waiting on, and how to join or agree) above `collab:plan-doc` (the current revision).
+- **Several people:**
+  - Unlike a PR collab, every clone acts as its own pinned login. `new` and `join` pin it, and each event records the login it came from.
+  - An agent is registered under one login, and a clone acting as another login can't use it.
+  - `new`, `join`, `agree` and `handoff` check for write access first, because pushing the session's ref needs it.
+- **Revisions:**
+  - `plan pull` writes the current revision and remembers its number as the draft's base. `plan edit` publishes the draft as the next revision.
+  - If others published since, `git merge-file --diff3 --object-id` merges the draft with the newest revision, on blob ids. That needs Git 2.43 or newer, which `doctor` checks.
+  - The merge runs inside the ledger's compare-and-swap, so a lost race merges again. A conflict publishes nothing: it writes `.collab/plans/<n>/draft.conflict.md`, and the text is refused while it still has conflict lines.
+  - Text is normalised before hashing: line endings become `\n`, a BOM is stripped, and it ends with one newline. It is capped at 50,000 characters and can't contain `<!-- collab:`.
+  - Every revision posts a comment with its diff, because editing an issue body notifies nobody.
+- **Consensus:**
+  - The plan is agreed when at least `minPeople` people are active (default 2) and every active person agrees to the current revision with a matching hash.
+  - A new revision resets every agreement. Agents draft and argue; only people agree.
+  - People agree through their agent after an explicit yes (`collab plan agree --rev N`), or with an issue comment `/collab agree r<N> <8+ hex of the hash>`. Comments count only from people with write access, and agents never post `/collab` comments.
+  - Each agreement is recorded with how it was given (`via`) and posted as a comment from that person's account.
+  - An agreed plan is frozen. The owner can `reopen` it from their own terminal, which resets agreements; `close` and `remove <login>` are owner-terminal-only too. The relay refuses all three.
+- **Browser edits:**
+  - If the plan block in the description no longer matches the current revision, collab leaves it, warns in the status block, and posts one notice with the diff.
+  - Agreements bind to the hash on the ref, never to the body. The next revision replaces the edited text.
+- **Handoff:**
+  - `plan handoff` first checks that GitHub has an agreement comment for the current revision from every person, and that the agreed text matches its recorded hash (every read of a revision checks this). The default branch comes from GitHub, not the ledger, and an existing build branch is reused only when it is one commit on that branch adding just the plan file.
+  - It builds a commit on `origin/<default>` with git plumbing (a temporary index, so the checkout is untouched) that adds `docs/plans/<n>-<slug>.md`, and pushes it to `collab/plan-<n>-build`. That is not `collab/plan-<n>`, because git would resolve that short name to the session's ref `refs/collab/plan-<n>`.
+  - It opens a draft PR "Build: <title>" whose body has a `collab:plan-source issue=… rev=… sha256=…` marker and "Closes #n".
+  - `collab context` on that PR returns `planSource` and the agreed text under `untrusted.plan`, but only when the plan's own ledger names this PR, the revision and hash match, the text matches the hash, and every agreement has its comment. A copied marker gets `null` and a warning.
+- **What this protects against:** mistakes, and people without write access. Like the rest of collab, it is not a defence against someone with write access: they can rewrite `refs/collab/plan-<n>` (custom refs can't be protected), edit others' comments, or drop a person from a hand-written ledger. The hash and comment checks only make such a change harder to miss.
+- **Known limit:** the build that follows is a normal PR collab, which is single-account: the person who runs `/collab <PR>` and their agents build it.
+
 ## Repo layout
 ```
 collab.ai/

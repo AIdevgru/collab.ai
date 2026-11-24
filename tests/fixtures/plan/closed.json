@@ -1,0 +1,100 @@
+{
+  "ledger": {
+    "schema": 1,
+    "kind": "plan",
+    "seq": 5,
+    "rev": null,
+    "issue": {
+      "repo": "o/r",
+      "number": 57,
+      "url": "https://github.com/o/r/issues/57",
+      "title": "Cache the API responses",
+      "defaultBranch": "main"
+    },
+    "owner": "zwymer",
+    "phase": "closed",
+    "current": 1,
+    "minPeople": 2,
+    "maxChars": 50000,
+    "revs": {
+      "1": {
+        "hash": "sha256:1bb5f9148437939944690392e70862f63049f3ae024849f35ed8c0ed5cbff793",
+        "blob": "dd6a6d4561b9f86c1e58c5860de2d9f0a9dc3800",
+        "base": 0,
+        "merged": false,
+        "agent": "claude-a1f3",
+        "login": "zwymer",
+        "summary": "First draft",
+        "chars": 77,
+        "at": "2026-11-16T12:00:00.000Z"
+      }
+    },
+    "people": {
+      "zwymer": {
+        "joinedAt": "2026-11-16T12:00:00.000Z",
+        "lastSeen": "2026-11-16T12:20:00.000Z",
+        "observer": false,
+        "left": null,
+        "removed": null
+      },
+      "alice": {
+        "joinedAt": "2026-11-16T12:05:00.000Z",
+        "lastSeen": "2026-11-16T12:15:00.000Z",
+        "observer": false,
+        "left": "2026-11-16T12:15:00.000Z",
+        "removed": null
+      },
+      "bob": {
+        "joinedAt": "2026-11-16T12:06:00.000Z",
+        "lastSeen": "2026-11-16T12:06:00.000Z",
+        "observer": false,
+        "left": null,
+        "removed": {
+          "by": "zwymer",
+          "at": "2026-11-16T12:18:00.000Z",
+          "reason": "Joined the wrong plan"
+        }
+      }
+    },
+    "agents": {
+      "claude-a1f3": {
+        "tool": "claude",
+        "vendor": "anthropic",
+        "login": "zwymer",
+        "host": "pc",
+        "joinedAt": "2026-11-16T12:00:00.000Z",
+        "lastSeen": "2026-11-16T12:20:00.000Z"
+      },
+      "codex-7k2p": {
+        "tool": "codex",
+        "vendor": "openai",
+        "login": "alice",
+        "host": "pc",
+        "joinedAt": "2026-11-16T12:05:00.000Z",
+        "lastSeen": "2026-11-16T12:15:00.000Z"
+      },
+      "gemini-9z9z": {
+        "tool": "gemini",
+        "vendor": "google",
+        "login": "bob",
+        "host": "pc",
+        "joinedAt": "2026-11-16T12:06:00.000Z",
+        "lastSeen": "2026-11-16T12:06:00.000Z"
+      }
+    },
+    "agreements": {},
+    "directives": [],
+    "lastCommentId": 0,
+    "lastCommentAt": null,
+    "notices": {},
+    "handoff": null,
+    "agreedAt": null,
+    "closed": {
+      "by": "zwymer",
+      "at": "2026-11-16T12:20:00.000Z",
+      "reason": "Superseded by plan #60"
+    }
+  },
+  "now": "2026-11-16T12:25:00.000Z",
+  "options": {}
+}

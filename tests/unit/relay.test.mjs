@@ -22,6 +22,31 @@ test("validate allows only agent commands", () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("validate runs the agent plan-session subcommands and refuses the owner ones", () => {
+  const root = tmp();
+  try {
+    const run = (argv) => validate(root, { v: 1, argv, cwd: "." });
+    for (const sub of ["list", "new", "join", "pull", "show", "edit", "say", "agree", "leave", "next", "wait", "status", "handoff"]) {
+      assert.equal(run(["plan", sub, "57"]).ok, true, sub);
+    }
+    assert.equal(run(["plan"]).ok, true, "no subcommand");
+    assert.equal(run(["plan", "--tasks", ".collab/plan.json", "--pr", "1"]).ok, true, "the PR planner's collab plan --tasks");
+    assert.equal(run(["plan", "--json", "agree", "57", "--withdraw"]).ok, true, "boolean flags don't swallow the subcommand");
+    assert.equal(run(["plan", "--agent", "codex-ab12", "show", "57", "--raw"]).ok, true);
+    for (const argv of [["plan", "close", "57"], ["plan", "remove", "57", "bob"], ["plan", "reopen", "57"], ["plan", "frobnicate"], ["plan", "--json", "close", "57"], ["plan", "--all", "reopen", "57"], ["plan", "Close", "57"]]) {
+      const v = run(argv);
+      assert.equal(v.ok, false, argv.join(" "));
+      assert.equal(v.code, EXIT.PRECONDITION);
+      assert.match(v.message, /^the relay does not run `collab plan \S+` \(owner commands need the owner's own terminal\)$/, argv.join(" "));
+    }
+    // An unknown flag takes the next word as its value, the same way the CLI parses it.
+    assert.equal(run(["plan", "--mystery", "close", "57"]).ok, false, "the subcommand is then 57");
+    assert.equal(run(["plan", "edit", "57", "--body-file", "../outside.md"]).ok, false, "file arguments stay inside the repo");
+    assert.match(run(["plan", "edit", "57", "--body-file=../outside.md"]).message, /--body-file must point inside the repo/);
+    assert.equal(run(["plan", "edit", "57", "--body-file", ".collab/plans/57/draft.md"]).ok, true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("validate keeps cwd and file arguments inside the repo", () => {
   const root = tmp();
   try {

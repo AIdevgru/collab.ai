@@ -14,7 +14,15 @@ const AGENT_ENV = /^(CLAUDECODE|CLAUDE_CODE_|AI_AGENT|CODEX_|GEMINI_CLI|GROK_|CO
 
 export const REPO = "o/r";
 
-export function setup({ pr = 1, body = "Owner notes.\n\n- [ ] add helpers\n\nHUMAN TEXT SENTINEL\n", headRef = "feat/x", verify = true, prState = {} } = {}) {
+// `at`, but not before `prev`; with `strict`, at least a second after it.
+function later(prev, at, strict) {
+  const p = prev ? Date.parse(prev) || 0 : 0;
+  return new Date(Math.max(Date.parse(at) || Date.now(), strict && p ? p + 1000 : p)).toISOString();
+}
+
+// `people` ({ alice: "write", bob: "read" }) adds collaborators with those roles and tokens
+// tok-<login>; zwymer is always the admin with tok-z.
+export function setup({ pr = 1, body = "Owner notes.\n\n- [ ] add helpers\n\nHUMAN TEXT SENTINEL\n", headRef = "feat/x", verify = true, prState = {}, people = {} } = {}) {
   const repo = makeRepo();
   const owner = repo.clone("owner");
   // Give the default branch a test command and a tiny library so collab verify has something to run.
@@ -31,10 +39,11 @@ export function setup({ pr = 1, body = "Owner notes.\n\n- [ ] add helpers\n\nHUM
     sh(["push", "-q", "origin", headRef], owner);
   }
   const headSha = sh(["rev-parse", `origin/${headRef}`], owner);
+  const extra = Object.entries(people ?? {}).filter(([login]) => login.toLowerCase() !== "zwymer");
   const fake = makeFakeGh({
     user: "zwymer",
-    tokens: { zwymer: "tok-z" },
-    repos: { [REPO]: { defaultBranch: "main", allowSquash: true, allowMerge: true, private: true, protected: ["main"], collaborators: { zwymer: "admin", reader: "read" }, gitDir: repo.remote } },
+    tokens: { zwymer: "tok-z", ...Object.fromEntries(extra.map(([login]) => [login, `tok-${login}`])) },
+    repos: { [REPO]: { defaultBranch: "main", allowSquash: true, allowMerge: true, private: true, protected: ["main"], collaborators: { zwymer: "admin", reader: "read", ...Object.fromEntries(extra) }, gitDir: repo.remote } },
     pulls: { [`${REPO}#${pr}`]: { title: "Add string helpers", body, state: "open", merged: false, draft: false, headRef, baseRef: "main", headSha, isCrossRepository: false, mergeable: "MERGEABLE", ci: "SUCCESS", checks: 2, additions: 10, deletions: 1, ...prState } },
     comments: { [`${REPO}#${pr}`]: [] },
   });
@@ -44,6 +53,56 @@ export function setup({ pr = 1, body = "Owner notes.\n\n- [ ] add helpers\n\nHUM
   function clone(name) {
     if (!clones[name]) clones[name] = repo.clone(name);
     return clones[name];
+  }
+
+  // A clone named after the login, pinned to it (git config collab.login), so the CLI there acts
+  // as that person through the fake's tok-<login> token.
+  const pinned = new Set();
+  function person(login) {
+    const dir = clone(login);
+    if (!pinned.has(login)) {
+      sh(["config", "collab.login", login], dir);
+      pinned.add(login);
+    }
+    return dir;
+  }
+
+  const fakeNow = () => process.env.COLLAB_NOW || new Date().toISOString();
+
+  // A comment `login` writes on issue or PR n in the browser: straight into the fake state, with the
+  // next comment id. Returns { id, login, body, createdAt, url }.
+  function browserComment(login, n, text, { at = fakeNow() } = {}) {
+    let made;
+    let kind = "pull";
+    fake.update((state) => {
+      state.comments ??= {};
+      const key = `${REPO}#${n}`;
+      state.comments[key] ??= [];
+      made = { id: state.nextId ?? 1000, login, body: String(text), createdAt: at };
+      state.nextId = made.id + 1;
+      state.comments[key].push(made);
+      const issue = state.pulls?.[key] ? null : state.issues?.[key];
+      if (issue) {
+        kind = "issues";
+        issue.updatedAt = later(issue.updatedAt, at, false);
+      }
+    });
+    return { ...made, url: `https://github.com/${REPO}/${kind}/${n}#issuecomment-${made.id}` };
+  }
+
+  // Issue n's body replaced by fn(body) the way a browser edit saves it: CRLF line endings, and an
+  // updatedAt strictly later than before (even with a pinned clock). Returns the new body.
+  function browserEdit(n, fn) {
+    let next;
+    fake.update((state) => {
+      const key = `${REPO}#${n}`;
+      const target = state.issues?.[key] ?? state.pulls?.[key];
+      if (!target) throw new Error(`browserEdit: no issue or PR ${key} in the fake state`);
+      next = String(fn(target.body ?? "")).replace(/\r?\n/g, "\r\n");
+      target.body = next;
+      target.updatedAt = later(target.updatedAt, fakeNow(), true);
+    });
+    return next;
   }
 
   function run(name, argv, extraEnv = {}) {
@@ -114,5 +173,5 @@ export function setup({ pr = 1, body = "Owner notes.\n\n- [ ] add helpers\n\nHUM
     repo.cleanup();
   }
 
-  return { repo, owner, fake, home, clone, run, runAsync, json, idOf, start, as, cleanup, pr, headRef };
+  return { repo, owner, fake, home, clone, person, browserComment, browserEdit, run, runAsync, json, idOf, start, as, cleanup, pr, headRef };
 }

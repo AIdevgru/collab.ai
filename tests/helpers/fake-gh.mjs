@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// A fake `gh` for tests: `gh auth token --user L`, `gh api ...` (the REST paths github.mjs uses)
-// and `gh api graphql` (liveSnapshot's aliased query and markPullRequestReadyForReview).
+// A fake `gh` for tests: `gh auth token --user L`, `gh api ...` (the REST paths github.mjs uses,
+// issues and labels included) and `gh api graphql` (liveSnapshot's aliased query and
+// markPullRequestReadyForReview).
 // State lives in the JSON file named by COLLAB_FAKE_GH_STATE; see fake-gh-state.mjs for its shape.
 // Use it through makeFakeGh() in fake-gh-state.mjs, which sets COLLAB_GH to run this script.
 
@@ -163,8 +164,140 @@ function findKey(obj, key) {
 function repoOf(state, repo) {
   const key = findKey(state.repos, repo);
   if (!key) return null;
-  state.repos[key] = { defaultBranch: "main", allowSquash: true, allowMerge: true, private: true, protected: [], collaborators: {}, ...state.repos[key] };
+  state.repos[key] = { defaultBranch: "main", allowSquash: true, allowMerge: true, private: true, protected: [], collaborators: {}, labels: [], ...state.repos[key] };
   return state.repos[key];
+}
+
+const ROLE_RANK = { none: 0, read: 1, triage: 2, write: 3, maintain: 4, admin: 5 };
+
+function roleOf(r, login) {
+  const who = login ? findKey(r.collaborators, login) : null;
+  return who ? r.collaborators[who] : "none";
+}
+
+const canPush = (r, login) => (ROLE_RANK[roleOf(r, login)] ?? 0) >= ROLE_RANK.write;
+
+// Issues and PRs share one number space, as on GitHub.
+function nextNumber(state, repo) {
+  const prefix = `${repo.toLowerCase()}#`;
+  const numbers = Object.keys({ ...state.pulls, ...state.issues, ...state.comments })
+    .filter((k) => k.toLowerCase().startsWith(prefix))
+    .map((k) => Number(k.split("#")[1]))
+    .filter(Number.isFinite);
+  return Math.max(0, ...numbers) + 1;
+}
+
+// An issue (not a PR) with defaults filled in, or null.
+function issueOf(state, repo, n) {
+  const key = findKey(state.issues, `${repo}#${n}`);
+  if (!key) return null;
+  const stored = state.issues[key];
+  const created = stored.createdAt ?? nowIso();
+  const i = { number: n, title: "", body: "", state: "open", stateReason: null, locked: false, labels: [], author: state.user, createdAt: created, updatedAt: stored.updatedAt ?? created, ...stored };
+  i.state = String(i.state).toLowerCase() === "closed" ? "closed" : "open";
+  state.issues[key] = i;
+  return i;
+}
+
+const isIssue = (state, repo, n) => Boolean(findKey(state.issues, `${repo}#${n}`)) && !findKey(state.pulls, `${repo}#${n}`);
+
+const labelName = (l) => (typeof l === "string" ? l : l?.name);
+
+function findLabel(r, name) {
+  return (r.labels ?? []).find((l) => String(l.name).toLowerCase() === String(name).toLowerCase()) ?? null;
+}
+
+// The repo's label with this name, created (GitHub's default grey) when missing.
+function ensureRepoLabel(r, name) {
+  let l = findLabel(r, name);
+  if (!l) {
+    l = { name: String(name), color: "ededed", description: "" };
+    (r.labels ??= []).push(l);
+  }
+  return l;
+}
+
+function addLabels(r, current, wanted) {
+  const out = [...(current ?? [])];
+  for (const raw of wanted) {
+    const name = ensureRepoLabel(r, raw).name;
+    if (!out.some((x) => x.toLowerCase() === name.toLowerCase())) out.push(name);
+  }
+  return out;
+}
+
+const restLabel = (repo, l) => ({
+  id: Number.parseInt(fakeSha(`${repo}:${l.name}`).slice(0, 8), 16),
+  node_id: `LA_${fakeSha(`${repo}:${l.name}`).slice(0, 16)}`,
+  url: `https://api.github.com/repos/${repo}/labels/${encodeURIComponent(l.name)}`,
+  name: l.name,
+  color: l.color ?? "ededed",
+  description: l.description ?? "",
+  default: false,
+});
+
+const labelObjs = (repo, r, names) => (names ?? []).map((n) => restLabel(repo, findLabel(r, n) ?? { name: n }));
+
+function restIssue(state, repo, r, i) {
+  return {
+    id: Number.parseInt(fakeSha(`${repo}#${i.number}:issue`).slice(0, 8), 16),
+    node_id: `I_${fakeSha(`${repo}#${i.number}`).slice(0, 16)}`,
+    number: i.number,
+    html_url: `https://github.com/${repo}/issues/${i.number}`,
+    url: `https://api.github.com/repos/${repo}/issues/${i.number}`,
+    title: i.title,
+    body: i.body,
+    state: i.state,
+    state_reason: i.stateReason ?? null,
+    locked: Boolean(i.locked),
+    labels: labelObjs(repo, r, i.labels),
+    user: { login: i.author ?? state.user },
+    comments: (state.comments?.[findKey(state.comments, `${repo}#${i.number}`)] ?? []).length,
+    created_at: i.createdAt,
+    updated_at: i.updatedAt,
+    closed_at: i.state === "closed" ? (i.closedAt ?? i.updatedAt) : null,
+  };
+}
+
+// A PR as GitHub's issues API shows it: with a pull_request field.
+function prAsIssue(state, repo, r, p) {
+  return {
+    id: Number.parseInt(fakeSha(`${repo}#${p.number}:issue`).slice(0, 8), 16),
+    node_id: p.nodeId,
+    number: p.number,
+    html_url: `https://github.com/${repo}/pull/${p.number}`,
+    url: `https://api.github.com/repos/${repo}/issues/${p.number}`,
+    title: p.title,
+    body: p.body,
+    state: p.state,
+    state_reason: null,
+    locked: false,
+    labels: labelObjs(repo, r, p.labels),
+    user: { login: p.author ?? state.user },
+    comments: (state.comments?.[findKey(state.comments, `${repo}#${p.number}`)] ?? []).length,
+    created_at: p.createdAt ?? nowIso(),
+    updated_at: p.updatedAt ?? p.createdAt ?? nowIso(),
+    closed_at: p.state === "closed" ? (p.mergedAt ?? nowIso()) : null,
+    pull_request: {
+      url: `https://api.github.com/repos/${repo}/pulls/${p.number}`,
+      html_url: `https://github.com/${repo}/pull/${p.number}`,
+      merged_at: p.merged ? (p.mergedAt ?? nowIso()) : null,
+    },
+  };
+}
+
+// The issue or PR behind issues/:n in its issue shape, or null.
+function anyIssue(state, repo, r, n) {
+  const p = pullOf(state, repo, n);
+  if (p) return { pr: p, rest: () => prAsIssue(state, repo, r, p) };
+  const i = issueOf(state, repo, n);
+  return i ? { issue: i, rest: () => restIssue(state, repo, r, i) } : null;
+}
+
+// Now, but never before the last update (a pinned clock can lag a browser edit's time).
+function touch(prev) {
+  const t = Math.max(Date.parse(nowIso()), prev ? Date.parse(prev) || 0 : 0);
+  return new Date(t).toISOString();
 }
 
 function pullOf(state, repo, n) {
@@ -239,12 +372,12 @@ function gqlPull(p) {
   };
 }
 
-function restComment(repo, n, c) {
+function restComment(state, repo, n, c) {
   const created = c.createdAt ?? c.created_at ?? nowIso();
   return {
     id: c.id,
     node_id: `IC_${c.id}`,
-    html_url: `https://github.com/${repo}/pull/${n}#issuecomment-${c.id}`,
+    html_url: `https://github.com/${repo}/${isIssue(state, repo, n) ? "issues" : "pull"}/${n}#issuecomment-${c.id}`,
     body: c.body ?? "",
     user: { login: c.login ?? c.user?.login ?? null },
     created_at: created,
@@ -304,23 +437,25 @@ function repos(state, method, seg, body, login, query = new URLSearchParams()) {
     // Every issue and PR comment in the repo; ids are unique across it.
     const mine = Object.entries(state.comments ?? {}).filter(([k]) => k.toLowerCase().startsWith(`${repo.toLowerCase()}#`));
     const dir = query.get("direction") === "desc" ? -1 : 1;
-    return { list: mine.flatMap(([k, l]) => l.map((c) => restComment(repo, Number(k.split("#")[1]), c))).sort((a, b) => dir * (a.id - b.id)) };
+    return { list: mine.flatMap(([k, l]) => l.map((c) => restComment(state, repo, Number(k.split("#")[1]), c))).sort((a, b) => dir * (a.id - b.id)) };
   }
   if (route === "GET issues/:n/comments" || route === "POST issues/:n/comments") {
     const key = findKey(state.comments, `${repo}#${n}`) ?? `${repo}#${n}`;
-    if (!findKey(state.pulls, `${repo}#${n}`) && !state.comments?.[key]) return httpFail(404, "Not Found");
+    if (!findKey(state.pulls, `${repo}#${n}`) && !findKey(state.issues, `${repo}#${n}`) && !state.comments?.[key]) return httpFail(404, "Not Found");
     state.comments ??= {};
     state.comments[key] ??= [];
     if (method === "GET") {
       // GitHub's `since`: only comments updated at or after that time.
       const since = query.get("since") ? Date.parse(query.get("since")) : null;
-      const all = state.comments[key].map((c) => restComment(repo, n, c));
+      const all = state.comments[key].map((c) => restComment(state, repo, n, c));
       return { list: since == null ? all : all.filter((c) => Date.parse(c.updated_at) >= since) };
     }
     const c = { id: state.nextId ?? 1000, login, body: String(body.body ?? ""), createdAt: nowIso() };
     state.nextId = c.id + 1;
     state.comments[key].push(c);
-    return { data: restComment(repo, n, c) };
+    const issue = isIssue(state, repo, n) ? issueOf(state, repo, n) : null;
+    if (issue) issue.updatedAt = touch(issue.updatedAt); // a comment updates the issue, as on GitHub
+    return { data: restComment(state, repo, n, c) };
   }
   if (method === "PATCH" && rest[0] === "issues" && rest[1] === "comments" && rest.length === 3) {
     const id = Number(rest[2]);
@@ -330,9 +465,69 @@ function repos(state, method, seg, body, login, query = new URLSearchParams()) {
       if (!c) continue;
       c.body = String(body.body ?? "");
       c.updatedAt = nowIso();
-      return { data: restComment(repo, Number(key.split("#")[1]), c) };
+      return { data: restComment(state, repo, Number(key.split("#")[1]), c) };
     }
     return httpFail(404, "Not Found");
+  }
+  if (route === "POST issues") return createIssue(state, repo, r, body, login);
+  if (route === "GET issues") {
+    // Issues and PRs (each PR with a pull_request field), newest first, like GitHub's default sort.
+    const want = (query.get("state") ?? "open").toLowerCase();
+    const labels = (query.get("labels") ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+    const prefix = `${repo.toLowerCase()}#`;
+    const numbers = (obj) => Object.keys(obj ?? {}).filter((k) => k.toLowerCase().startsWith(prefix)).map((k) => Number(k.split("#")[1]));
+    const all = [
+      ...numbers(state.pulls).map((k) => prAsIssue(state, repo, r, pullOf(state, repo, k))),
+      ...numbers(state.issues).filter((k) => !findKey(state.pulls, `${repo}#${k}`)).map((k) => restIssue(state, repo, r, issueOf(state, repo, k))),
+    ];
+    const list = all
+      .filter((i) => want === "all" || i.state === want)
+      .filter((i) => labels.every((l) => i.labels.some((x) => x.name.toLowerCase() === l)))
+      .sort((a, b) => b.number - a.number);
+    return { list };
+  }
+  if (route === "GET issues/:n" || route === "PATCH issues/:n") {
+    const hit = anyIssue(state, repo, r, n);
+    if (!hit) return httpFail(404, "Not Found");
+    if (method === "PATCH") {
+      const target = hit.pr ?? hit.issue;
+      for (const k of ["title", "body"]) if (typeof body[k] === "string") target[k] = body[k];
+      if (hit.issue) {
+        const was = hit.issue.state;
+        if (body.state === "closed" || body.state === "open") hit.issue.state = body.state;
+        if ("state_reason" in body) hit.issue.stateReason = body.state_reason;
+        else if (hit.issue.state !== was) hit.issue.stateReason = hit.issue.state === "closed" ? "completed" : "reopened";
+        if (hit.issue.state === "closed" && was !== "closed") hit.issue.closedAt = nowIso();
+        if (Array.isArray(body.labels)) hit.issue.labels = addLabels(r, [], body.labels.map(labelName).filter(Boolean));
+        hit.issue.updatedAt = touch(hit.issue.updatedAt);
+      } else if (body.state === "closed" || body.state === "open") {
+        hit.pr.state = body.state;
+      }
+    }
+    return { data: hit.rest() };
+  }
+  if (route === "POST issues/:n/labels") {
+    const hit = anyIssue(state, repo, r, n);
+    if (!hit) return httpFail(404, "Not Found");
+    if (!canPush(r, login)) return httpFail(403, "Must have push access to add labels.");
+    const target = hit.pr ?? hit.issue;
+    target.labels = addLabels(r, target.labels, (Array.isArray(body.labels) ? body.labels : []).map(labelName).filter(Boolean));
+    if (hit.issue) hit.issue.updatedAt = touch(hit.issue.updatedAt);
+    return { data: labelObjs(repo, r, target.labels) };
+  }
+  if (method === "GET" && rest[0] === "labels" && rest.length === 2) {
+    const l = findLabel(r, rest[1]);
+    return l ? { data: restLabel(repo, l) } : httpFail(404, "Not Found");
+  }
+  if (method === "POST" && rest[0] === "labels" && rest.length === 1) {
+    if (!canPush(r, login)) return httpFail(403, "Must have admin rights to Repository.");
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    const color = String(body.color ?? "ededed").replace(/^#/, "");
+    if (!name || !/^[0-9a-f]{6}$/i.test(color)) return httpFail(422, "Validation Failed");
+    if (findLabel(r, name)) return httpFail(422, "Validation Failed");
+    const l = { name, color: color.toLowerCase(), description: String(body.description ?? "") };
+    (r.labels ??= []).push(l);
+    return { data: restLabel(repo, l) };
   }
   if (method === "GET" && rest[0] === "collaborators" && rest[2] === "permission" && rest.length === 3) {
     const who = findKey(r.collaborators, rest[1]);
@@ -367,9 +562,6 @@ function createPull(state, repo, r, body, login) {
   if (!head || !base || !title) return httpFail(422, "Validation Failed");
   if (r.gitDir && !gitRev(r.gitDir, head)) return httpFail(422, "Validation Failed");
   const prefix = `${repo.toLowerCase()}#`;
-  const numbers = Object.keys({ ...state.pulls, ...state.comments })
-    .filter((k) => k.toLowerCase().startsWith(prefix))
-    .map((k) => Number(k.split("#")[1]));
   for (const k of Object.keys(state.pulls ?? {})) {
     if (!k.toLowerCase().startsWith(prefix)) continue;
     const p = pullOf(state, repo, Number(k.split("#")[1]));
@@ -377,7 +569,7 @@ function createPull(state, repo, r, body, login) {
       return httpFail(422, `A pull request already exists for ${repo.split("/")[0]}:${head}.`);
     }
   }
-  const n = Math.max(0, ...numbers) + 1;
+  const n = nextNumber(state, repo);
   state.pulls ??= {};
   state.pulls[`${repo}#${n}`] = {
     title,
@@ -389,6 +581,29 @@ function createPull(state, repo, r, body, login) {
     author: login,
   };
   return { data: restPull(state, repo, pullOf(state, repo, n)) };
+}
+
+// Labels stick only for logins with push access (GitHub drops them silently otherwise); a label
+// the repo lacks is created.
+function createIssue(state, repo, r, body, login) {
+  const title = typeof body.title === "string" ? body.title : "";
+  if (!title.trim()) return httpFail(422, "Validation Failed");
+  const wanted = (Array.isArray(body.labels) ? body.labels : []).map(labelName).filter(Boolean);
+  const n = nextNumber(state, repo);
+  const at = nowIso();
+  state.issues ??= {};
+  state.issues[`${repo}#${n}`] = {
+    title,
+    body: typeof body.body === "string" ? body.body : "",
+    state: "open",
+    stateReason: null,
+    locked: false,
+    labels: canPush(r, login) ? addLabels(r, [], wanted) : [],
+    author: login,
+    createdAt: at,
+    updatedAt: at,
+  };
+  return { data: restIssue(state, repo, r, issueOf(state, repo, n)) };
 }
 
 function mergePull(repo, r, p, body) {

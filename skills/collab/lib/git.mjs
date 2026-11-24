@@ -1,8 +1,10 @@
 // Every git child process goes through git(): argument arrays, no shell, stable English output.
 
 import { spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { randomBytes } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { iso } from "./clock.mjs";
 import { CollabError, EXIT } from "./errors.mjs";
 
 const MAX_BUFFER = 64 * 1024 * 1024;
@@ -152,4 +154,128 @@ export function addWorktree(cwd, path, branch, startPoint) {
     git(["worktree", "add", "--no-track", "-b", branch, target, startPoint], { cwd });
   }
   return { path: target, branch, created: true };
+}
+
+// ---------------------------------------------------------------------------
+// Text blobs (plan sessions)
+
+const OID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+
+function checkOid(oid) {
+  if (typeof oid !== "string" || !OID_RE.test(oid)) throw new CollabError(EXIT.BUG, `not a git object id: "${oid}"`);
+  return oid;
+}
+
+// One spelling for every text the plan store keeps: "\n" line ends, no BOM, exactly one final "\n".
+export function normText(s) {
+  let t = String(s ?? "");
+  if (t.charCodeAt(0) === 0xfeff) t = t.slice(1);
+  if (t === "") return "";
+  t = t.replace(/\r\n?/g, "\n");
+  // A loop, not /\n+$/: that regex is quadratic on a long run of newlines in untrusted text.
+  let end = t.length;
+  while (end > 0 && t[end - 1] === "\n") end--;
+  return `${t.slice(0, end)}\n`;
+}
+
+// Writes normText(text) as a blob and returns its id. Standard input means no attributes or
+// filters apply (--no-filters says so explicitly), so every clone gets the same id.
+export function hashText(cwd, text) {
+  return git(["hash-object", "-w", "--no-filters", "--stdin"], { cwd, input: normText(text) }).stdout.trim();
+}
+
+export function blobText(cwd, oid) {
+  return git(["cat-file", "blob", checkOid(oid)], { cwd }).stdout;
+}
+
+// A unified diff of two blobs with 2 lines of context, starting at the first hunk ("" when equal).
+export function diffBlobs(cwd, a, b) {
+  checkOid(a);
+  checkOid(b);
+  if (a.toLowerCase() === b.toLowerCase()) return "";
+  const r = git(["diff", "--no-color", "--no-ext-diff", "--no-textconv", "-U2", a, b], { cwd, allowFail: true });
+  if (r.code > 1) throw new CollabError(EXIT.ENV, `git diff failed: ${r.stderr.trim().split(/\r?\n/)[0] || `exit ${r.code}`}`, { args: ["diff", a, b], ...r });
+  const lines = r.stdout.split("\n");
+  const hunk = lines.findIndex((l) => l.startsWith("@@"));
+  if (hunk >= 0) return lines.slice(hunk).join("\n");
+  // No hunk (for example "Binary files differ"): keep what git said, without the header.
+  return lines.filter((l) => !/^(?:diff --git |index |--- |\+\+\+ )/.test(l)).join("\n");
+}
+
+const oneLine = (s) => String(s ?? "").replace(/[\r\n]+/g, " ");
+
+// Three-way merge of three blobs. Exit 0 is clean, 1-127 counts the conflicts (text holds the
+// markers), 129 means this git doesn't know --object-id (added in 2.43).
+export function mergeText(cwd, { ours, base, theirs, labels = ["ours", "base", "theirs"] } = {}) {
+  const [lo, lb, lt] = labels;
+  const args = ["merge-file", "-p", "--diff3", "--object-id", "-L", oneLine(lo ?? "ours"), "-L", oneLine(lb ?? "base"), "-L", oneLine(lt ?? "theirs"), checkOid(ours), checkOid(base), checkOid(theirs)];
+  const r = git(args, { cwd, allowFail: true });
+  if (r.code === 129) {
+    throw new CollabError(EXIT.ENV, "plan sessions need git 2.43 or newer", { args, ...r, version: gitVersion() });
+  }
+  if (r.code > 127 || r.code < 0) {
+    throw new CollabError(EXIT.ENV, `git merge-file failed: ${r.stderr.trim().split(/\r?\n/)[0] || `exit ${r.code}`}`, { args, ...r });
+  }
+  return { clean: r.code === 0, text: normText(r.stdout), conflicts: r.code };
+}
+
+// A path inside the repo: relative, "/" separators, no empty, "." or ".." segments, no ".git".
+function checkRepoPath(p) {
+  const s = String(p ?? "");
+  const segs = s.split("/");
+  if (!s || s.includes("\\") || s.includes("\0") || /^[A-Za-z]:/.test(s) || segs.some((x) => x === "" || x === "." || x === ".." || x.toLowerCase() === ".git")) {
+    throw new CollabError(EXIT.PRECONDITION, `"${s}" can't be a file path in the repo: use a relative path with / separators`);
+  }
+  return s;
+}
+
+// A commit on top of `base` whose tree is base's tree plus path := normText(text). It uses a
+// temporary index, so the working tree, HEAD and the real index are never touched; nothing
+// points at the commit until the caller pushes it.
+export function commitFileOnto(cwd, { base, path, text, message, author } = {}) {
+  const file = checkRepoPath(path);
+  if (typeof base !== "string" || !base || base.startsWith("-")) throw new CollabError(EXIT.BUG, `not a commit: "${base}"`);
+  if (!author?.name || !author?.email) throw new CollabError(EXIT.BUG, "commitFileOnto needs author = { name, email }");
+  const baseSha = git(["rev-parse", "--verify", "--quiet", `${base}^{commit}`], { cwd, allowFail: true });
+  if (baseSha.code !== 0) throw new CollabError(EXIT.PRECONDITION, `${base} is not a commit in this clone (fetch first)`, { base });
+  const parent = baseSha.stdout.trim();
+  const oid = hashText(cwd, text);
+  const index = join(gitCommonDir(cwd), `collab-index-${process.pid}-${randomBytes(4).toString("hex")}`);
+  const env = { GIT_INDEX_FILE: index };
+  try {
+    git(["read-tree", parent], { cwd, env });
+    git(["update-index", "--add", "--cacheinfo", `100644,${oid},${file}`], { cwd, env });
+    const tree = git(["write-tree"], { cwd, env }).stdout.trim();
+    const when = iso();
+    const who = {
+      GIT_AUTHOR_NAME: author.name,
+      GIT_AUTHOR_EMAIL: author.email,
+      GIT_AUTHOR_DATE: when,
+      GIT_COMMITTER_NAME: author.name,
+      GIT_COMMITTER_EMAIL: author.email,
+      GIT_COMMITTER_DATE: when,
+    };
+    const msg = String(message ?? "").endsWith("\n") ? String(message ?? "") : `${message ?? ""}\n`;
+    return git(["commit-tree", tree, "-p", parent, "-F", "-"], { cwd, env: who, input: msg }).stdout.trim();
+  } finally {
+    rmSync(index, { force: true });
+    rmSync(`${index}.lock`, { force: true });
+  }
+}
+
+let versionCache;
+
+// [major, minor, patch] of the git on PATH, or null when it can't be run or read.
+export function gitVersion() {
+  if (versionCache !== undefined) return versionCache;
+  let v = null;
+  try {
+    const r = git(["--version"], { allowFail: true });
+    const m = r.code === 0 ? /(\d+)\.(\d+)(?:\.(\d+))?/.exec(r.stdout) : null;
+    v = m ? [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)] : null;
+  } catch {
+    v = null;
+  }
+  versionCache = v;
+  return v;
 }

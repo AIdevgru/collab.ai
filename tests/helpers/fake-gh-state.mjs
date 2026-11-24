@@ -6,13 +6,22 @@
 //   tokens: { zwymer: "tok-z" },            // `gh auth token --user L`; GH_TOKEN=<token> acts as that login
 //   repos: { "o/r": { defaultBranch: "main", allowSquash: true, allowMerge: true, private: true,
 //                     protected: ["main"], collaborators: { zwymer: "admin" },
+//                     labels: [{ name: "collab-plan", color: "5319e7", description: "" }],
 //                     gitDir: "/abs/remote.git" } },   // optional: head SHAs, merges and branch
 //                                                       // deletes then use this bare repo
 //   pulls: { "o/r#42": { title, body, state: "open"|"closed", merged, draft, headRef, baseRef, headSha,
 //                        isCrossRepository, mergeable: "MERGEABLE"|"CONFLICTING"|"UNKNOWN",
 //                        ci: "SUCCESS"|"FAILURE"|"ERROR"|"PENDING"|"EXPECTED"|null, checks: 3,
-//                        additions, deletions, nodeId } },
-//   comments: { "o/r#42": [{ id, login, body, createdAt }] },
+//                        additions, deletions, nodeId, labels: [names] } },
+//   issues: { "o/r#57": { title, body, state: "open"|"closed", stateReason: null|"completed"|"not_planned"|"reopened",
+//                         locked: false, labels: [names], author, createdAt, updatedAt } },
+//             // Issues and PRs share one number counter (the highest pulls/issues/comments key + 1).
+//             // POST issues sets labels only for logins with write access or more (GitHub drops them
+//             // silently otherwise) and creates any label the repo lacks. GET issues lists PRs too, each
+//             // with a pull_request field; GET/PATCH issues/:n answer for a PR number the same way.
+//             // POST labels is 403 below write and 422 when the label exists (names match case-insensitively).
+//   comments: { "o/r#42": [{ id, login, body, createdAt, updatedAt? }] },   // PR or issue numbers;
+//             // comment URLs use /issues/ for an issue and /pull/ otherwise
 //   nextId: 1000,                           // next comment id
 //   failures: [{ match: "PUT repos/o/r/pulls/7/merge", status: 500, message: "boom", times: 1 }],
 //             // `match` is a substring of "<METHOD> <path>" ("POST graphql" for GraphQL);
@@ -89,7 +98,7 @@ export function updateState(file, fn) {
 }
 
 export function defaultState(initial = {}) {
-  return { user: null, tokens: {}, repos: {}, pulls: {}, comments: {}, nextId: 1000, failures: [], calls: [], ...structuredClone(initial) };
+  return { user: null, tokens: {}, repos: {}, pulls: {}, issues: {}, comments: {}, nextId: 1000, failures: [], calls: [], ...structuredClone(initial) };
 }
 
 // makeFakeGh(initialState) -> { env, file, read(), update(fn), calls(), use(), cleanup() }
