@@ -6,7 +6,7 @@
 // login, so auth() is never given a ledger login here.
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -175,7 +175,51 @@ function checkText(ctx, raw, what = "the plan") {
   return text;
 }
 
-const blobText = (ctx, l, n) => G.blobText(ctx.root, l.revs[n].blob);
+// A revision's text, checked against the hash people agreed to: the ref can be force-pushed by anyone
+// with write access, and a swapped blob must never pass for the agreed plan.
+function blobText(ctx, l, n) {
+  const r = l.revs[n];
+  const text = G.blobText(ctx.root, r.blob);
+  if (sha(text) !== r.hash) throw new CollabError(EXIT.ENV, `revision ${n} of plan #${l.issue?.number} on refs/collab/plan-${l.issue?.number} doesn't match its recorded hash; someone rewrote the session's ref. Ask the owner to check it.`);
+  return text;
+}
+
+// A whole-number flag, or undefined when it wasn't given. `--rev` with no value parses as true, which
+// Number() would quietly turn into 1.
+function intFlag(ctx, name, { min = 1, max = Number.MAX_SAFE_INTEGER, what = "a whole number" } = {}) {
+  const v = ctx.flags[name];
+  if (v === undefined) return undefined;
+  const n = v === true ? Number.NaN : Number(v);
+  if (!Number.isSafeInteger(n) || n < min || n > max) throw new CollabError(EXIT.PRECONDITION, `--${name} needs ${what}`);
+  return n;
+}
+
+const canon = (p) => {
+  let q = path.resolve(p);
+  try { q = realpathSync.native(q); } catch { /* not there yet */ }
+  return process.platform === "win32" ? q.toLowerCase() : q;
+};
+const sameFile = (a, b) => canon(a) === canon(b);
+
+// Plan text and messages are published to GitHub, so they are read only from the repo's .collab/
+// folder: never a file such as .env or .git/config that an agent was talked into naming.
+function readPlanFile(ctx, file) {
+  const p = ctx.h.inputPath(ctx, String(file));
+  const dir = path.join(ctx.root, ".collab");
+  const r = path.relative(canon(dir), canon(p));
+  if (!r || r.startsWith("..") || path.isAbsolute(r)) {
+    throw new CollabError(EXIT.PRECONDITION, `${file} isn't in the repo's .collab/ folder. collab publishes plan files to GitHub, so it reads them only from there: copy it into .collab/ first.`);
+  }
+  try { return { path: p, text: readFileSync(p, "utf8") }; } catch (e) { throw new CollabError(EXIT.PRECONDITION, `cannot read ${p}: ${e.message}`); }
+}
+
+// Closed on GitHub ends the session too, even while the ledger still says drafting.
+function requireOpenIssue(ctx) {
+  if (ctx.flags.offline) return;
+  if (gh.getIssue(ctx.repo, ctx.n, { auth: auth(ctx) }).state === "CLOSED") {
+    throw new CollabError(EXIT.UNSUPPORTED, `issue #${ctx.n} is closed on GitHub, so plan session #${ctx.n} is over. Reopen the issue to go on.`);
+  }
+}
 
 // ---------------------------------------------------------------- local seen state and drafts
 
@@ -237,19 +281,19 @@ function conversation(ctx, sinceId = 0) {
 
 // `/collab agree r<N> <hash>`, `/collab withdraw`, `/collab leave` and `/collab close` comments from
 // people with write access, applied before anything else. Each one is recorded as a directive.
-function directiveEvents(ctx) {
-  const l = ctx.ledger;
-  if (!l || ctx.flags.offline) return [];
-  let comments;
-  try { comments = gh.commentsSince(ctx.repo, ctx.n, l.lastCommentId ?? 0, { auth: auth(ctx), sinceAt: l.lastCommentAt }); } catch { return []; }
-  comments = comments.filter((c) => Number(c.id) > Number(l.lastCommentId ?? 0));
+// Built from `cur`, the ledger being written to, inside the compare-and-swap: after a lost race the
+// events are rebuilt from the newer ledger, so a comment another writer already applied is skipped
+// whole (a stale agreement can't outlive its directive) and nothing is written for nothing.
+function directiveEvents(ctx, cur, fetched) {
+  const comments = fetched.filter((c) => Number(c.id) > Number(cur.lastCommentId ?? 0));
   if (!comments.length) return [];
   const events = [];
-  let probe = l;
+  let probe = cur;
   const step = (e) => { probe = PL.apply(probe, { ...e, seq: probe.seq + 1 }); };
   for (const c of comments) {
     if (/<!--\s*collab:/i.test(c.body ?? "")) continue; // collab's own comments, and agents' messages
-    const m = /^\s*\/collab\s+(agree|withdraw|leave|close)\b([^\n]*)/im.exec(c.body ?? "");
+    // At most 3 spaces of indent: 4 make a Markdown code block, as when someone explains the command.
+    const m = /^ {0,3}\/collab\s+(agree|withdraw|leave|close)\b([^\n]*)/im.exec(c.body ?? "");
     if (!m) continue;
     const cmd = m[1].toLowerCase();
     const who = { login: c.login, agent: null };
@@ -266,10 +310,10 @@ function directiveEvents(ctx) {
       else {
         rev = Number(a[1]);
         hashPrefix = a[2].toLowerCase();
-        const cur = probe.revs?.[probe.current];
+        const now = probe.revs?.[probe.current];
         if (rev !== probe.current) why = `revision ${probe.current} is current, not ${rev}`;
-        else if (!String(cur?.hash ?? "").replace(/^sha256:/, "").startsWith(hashPrefix)) why = `the hash doesn't match revision ${rev}`;
-        else main = pev(ctx, "agree", { rev, hash: cur.hash, via: "comment", commentId: c.id, url: c.url }, who);
+        else if (!String(now?.hash ?? "").replace(/^sha256:/, "").startsWith(hashPrefix)) why = `the hash doesn't match revision ${rev}`;
+        else main = pev(ctx, "agree", { rev, hash: now.hash, via: "comment", commentId: c.id, url: c.url }, who);
       }
     } else if (cmd === "withdraw") main = pev(ctx, "agree.withdraw", {}, who);
     else if (cmd === "leave") main = pev(ctx, "person.leave", {}, who);
@@ -278,35 +322,30 @@ function directiveEvents(ctx) {
       try { PL.apply(probe, { ...main, seq: probe.seq + 1 }); } catch (e) { why = e.message; main = null; }
     }
     const d = pev(ctx, "directive", { commentId: c.id, commentAt: c.createdAt, cmd, ...(rev ? { rev } : {}), ...(hashPrefix ? { hashPrefix } : {}), url: c.url, applied: !!main, ...(why ? { why } : {}) }, who);
-    try {
-      step(d);
-      events.push(d);
-      if (main) { step(main); events.push(main); }
-    } catch { /* a directive the ledger already holds */ }
+    step(d);
+    events.push(d);
+    if (main) { step(main); events.push(main); }
   }
   const last = comments.at(-1);
-  events.push(pev(ctx, "comments.seen", { lastCommentId: last.id, lastCommentAt: last.createdAt }, { login: ctx.login, agent: null }));
+  if (Number(last.id) > Number(probe.lastCommentId ?? 0)) {
+    events.push(pev(ctx, "comments.seen", { lastCommentId: last.id, lastCommentAt: last.createdAt }, { login: ctx.login, agent: null }));
+  }
   return events;
 }
 
 // Housekeeping before every read and write: apply new comment directives. A busy ledger never blocks a read.
 function housekeeping(ctx) {
-  const events = directiveEvents(ctx);
-  if (!events.length) return;
+  const l = ctx.ledger;
+  if (!l || ctx.flags.offline) return;
+  let fetched;
+  try { fetched = gh.commentsSince(ctx.repo, ctx.n, l.lastCommentId ?? 0, { auth: auth(ctx), sinceAt: l.lastCommentAt }); } catch { return; }
+  if (!fetched.some((c) => Number(c.id) > Number(l.lastCommentId ?? 0))) return;
   let changed = false;
   try {
     commitPlan(ctx, (cur) => {
-      changed = false;
-      let probe = cur;
-      const keep = [];
-      for (const e of events) {
-        try {
-          probe = PL.apply(probe, { ...e, seq: probe.seq + 1 });
-          keep.push(e);
-          if (e.type === "directive" && e.data.applied) changed = true;
-        } catch { /* stale or already applied */ }
-      }
-      return keep;
+      const events = directiveEvents(ctx, cur, fetched);
+      changed = events.some((e) => e.type === "directive" && e.data.applied);
+      return events;
     });
     if (changed) publish(ctx);
   } catch (e) {
@@ -318,10 +357,14 @@ function housekeeping(ctx) {
 
 // ---------------------------------------------------------------- the issue body and notices
 
+// A notice collab already posted, from someone in the session: anyone else could post the marker
+// first to keep the notice from ever going out.
 function findNotice(ctx, key) {
   try {
     const mark = `<!-- collab:notice key=${key} -->`;
-    return gh.commentsSince(ctx.repo, ctx.n, 0, { auth: auth(ctx) }).find((c) => String(c.body ?? "").startsWith(mark))?.id ?? null;
+    const people = ctx.ledger?.people ?? {};
+    return gh.commentsSince(ctx.repo, ctx.n, 0, { auth: auth(ctx) })
+      .find((c) => String(c.body ?? "").startsWith(mark) && (Object.hasOwn(people, c.login) || c.login === ctx.login))?.id ?? null;
   } catch { return null; }
 }
 
@@ -337,17 +380,26 @@ function ensureNotice(ctx, key, text, events) {
 
 // The issue body: the status block, then the plan. The plan block changes only for a newer revision,
 // so a browser edit of it stays (with a warning) until the next revision replaces it.
+// A block numbered past what the ledger knows was either written from a newer ledger (read it again)
+// or had its number edited in the browser, which would keep collab from ever updating it.
+const resetSeq = (body, name) => body.replace(new RegExp(`(<!-- collab:${name}:start seq=)\\d+`), (_m, head) => `${head}0`);
+
 function composeBody(ctx, existing) {
-  const l = ctx.ledger;
-  const docText = trimOuter(blobText(ctx, l, l.current));
   let body = String(existing ?? "");
   const doc = P.readBlock(body, { name: "plan-doc" });
+  const status = P.readMarker(body, { name: "plan-status" });
+  if ((doc && doc.seq > ctx.ledger.current) || (status && status.seq > ctx.ledger.seq)) loadPlan(ctx);
+  const l = ctx.ledger;
+  let forged = false;
+  if (doc && doc.seq > l.current) { body = resetSeq(body, "plan-doc"); doc.seq = 0; forged = true; }
+  if (status && status.seq > l.seq) body = resetSeq(body, "plan-status");
+  const docText = trimOuter(blobText(ctx, l, l.current));
   let browserEdit = null;
   if (!doc) body = `${body.replace(/\s+$/, "")}${body.trim() ? "\n\n" : ""}${P.markedBlock("plan-doc", l.current, null, docText)}\n`;
   else if (doc.seq < l.current) body = P.splice(body, docText, l.current, null, { name: "plan-doc" }) ?? body;
-  else if (doc.seq === l.current && trimOuter(doc.text) !== docText) browserEdit = doc.text;
+  else if (trimOuter(doc.text) !== docText) browserEdit = doc.text;
   if (R) body = P.splice(body, R.renderStatus(l, now(), { browserEdit: !!browserEdit }), l.seq, iso(), { name: "plan-status" }) ?? body;
-  return { body, browserEdit };
+  return { body, browserEdit, forged };
 }
 
 // After a change: notices that are due, then the issue body. Best effort, like the PR dashboard.
@@ -358,19 +410,23 @@ function publish(ctx) {
   try {
     if (l.phase === "agreed" || l.phase === "handed-off") {
       const who = Object.keys(l.agreements ?? {}).sort().join(", ");
-      ensureNotice(ctx, `agreed:r${l.current}`, [
+      ensureNotice(ctx, `agreed:r${l.current}:${String(l.agreedAt ?? "").replace(/[^0-9]/g, "")}`, [
         `✅ Agreed: everyone agreed to revision ${l.current} (${short(l.revs[l.current].hash)}): ${who}.`,
         "",
         `Next: \`collab plan handoff ${ctx.n}\` opens a draft PR that holds this plan, ready for \`/collab <PR link>\`. The owner can reopen the plan with \`collab plan reopen ${ctx.n}\` in their own terminal.`,
       ].join("\n"), events);
     }
     const issue = gh.getIssue(ctx.repo, ctx.n, { auth: auth(ctx) });
-    const { body, browserEdit } = composeBody(ctx, issue.body);
+    const { body, browserEdit, forged } = composeBody(ctx, issue.body);
+    const cur = ctx.ledger.current;
+    if (forged) {
+      ensureNotice(ctx, `forged-doc:r${cur}`, `⚠️ Warning: the plan's revision number in this issue's description was edited in the browser, so collab put revision ${cur} back. Agreements are bound to the revisions on collab's ref, never to this description.`, events);
+    }
     if (browserEdit !== null) {
       let diff = "";
-      try { diff = G.diffBlobs(ctx.root, l.revs[l.current].blob, G.hashText(ctx.root, browserEdit)); } catch { /* the notice still goes out */ }
-      ensureNotice(ctx, `browser-edit:r${l.current}`, [
-        `⚠️ Warning: the plan in this issue's description was edited in the browser. collab keeps revision ${l.current} as the plan (agreements are bound to it), and the edited text stays visible until the next revision replaces it.`,
+      try { diff = G.diffBlobs(ctx.root, ctx.ledger.revs[cur].blob, G.hashText(ctx.root, browserEdit)); } catch { /* the notice still goes out */ }
+      ensureNotice(ctx, `browser-edit:r${cur}`, [
+        `⚠️ Warning: the plan in this issue's description was edited in the browser. collab keeps revision ${cur} as the plan (agreements are bound to it), and the edited text stays visible until the next revision replaces it.`,
         "To propose that change, comment here or use `/collab plan` in your agent.",
         ...(diff ? ["", "<details><summary>What the browser edit changed</summary>", "", "```diff", diff.replace(/```/g, "ˋˋˋ").slice(0, 3000), "```", "</details>"] : []),
       ].join("\n"), events);
@@ -414,10 +470,9 @@ async function newCmd(ctx) {
   requireWrite(ctx);
   const title = String(ctx.flags.title && ctx.flags.title !== true ? ctx.flags.title : ctx.args.join(" ")).replace(/\s+/g, " ").trim();
   if (!title) throw new CollabError(EXIT.PRECONDITION, 'usage: collab plan new --title "<what to plan>" [--body-file f] [--people N] --tool <claude|codex|…>');
-  const minPeople = ctx.flags.people === undefined ? 2 : Number(ctx.flags.people);
-  if (!Number.isSafeInteger(minPeople) || minPeople < 1 || minPeople > 50) throw new CollabError(EXIT.PRECONDITION, "--people must be a whole number from 1 to 50");
+  const minPeople = intFlag(ctx, "people", { max: 50, what: "a whole number from 1 to 50" }) ?? 2;
   const raw = ctx.flags["body-file"] && ctx.flags["body-file"] !== true
-    ? ctx.h.readTextFile(ctx, ctx.flags["body-file"])
+    ? readPlanFile(ctx, ctx.flags["body-file"]).text
     : readFileSync(path.join(TEMPLATES, "plan-doc.md"), "utf8").replaceAll("{{request}}", title.replace(/<!--/g, "&lt;!--"));
   const text = checkText(ctx, raw);
   const info = gh.repoInfo(ctx.repo, { auth: auth(ctx) });
@@ -434,6 +489,8 @@ async function newCmd(ctx) {
   const blob = G.hashText(ctx.root, text);
   try {
     commitPlan(ctx, (cur) => {
+      // Our own write from an earlier try whose answer was lost: done, not a clash.
+      if (cur && cur.owner === ctx.login && cur.revs?.[1]?.hash === sha(text) && !cur.revs?.[2]) return null;
       if (cur) throw new CollabError(EXIT.PRECONDITION, `#${ctx.n} already has a plan session`);
       const ledger = PL.newPlanLedger({
         issue: { repo: ctx.repo, number: ctx.n, url: issue.url, title, defaultBranch: info.defaultBranch },
@@ -631,10 +688,15 @@ async function edit(ctx) {
       ? `plan session #${ctx.n} is closed.`
       : `plan #${ctx.n} is ${ctx.ledger.phase}, so it is frozen. The owner can reopen it with \`collab plan reopen ${ctx.n}\` in their own terminal.`);
   }
+  requireOpenIssue(ctx);
   const fileArg = ctx.flags["body-file"] && ctx.flags["body-file"] !== true ? String(ctx.flags["body-file"]) : rel(ctx, draftFile(ctx));
-  const draft = checkText(ctx, ctx.h.readTextFile(ctx, fileArg), "your draft");
-  const base = ctx.flags.base !== undefined ? Number(ctx.flags.base) : readBase(ctx) ?? ctx.ledger.current;
-  if (!Number.isSafeInteger(base) || !ctx.ledger.revs[base]) throw new CollabError(EXIT.PRECONDITION, `--base ${ctx.flags.base} is not a revision of plan #${ctx.n}`);
+  const input = readPlanFile(ctx, fileArg);
+  const draft = checkText(ctx, input.text, "your draft");
+  const conflictFile = path.join(planDir(ctx), "draft.conflict.md");
+  const fromDraft = sameFile(input.path, draftFile(ctx));
+  const fromConflict = sameFile(input.path, conflictFile);
+  const base = intFlag(ctx, "base", { what: "a revision number" }) ?? (fromDraft ? readBase(ctx) : null) ?? ctx.ledger.current;
+  if (!ctx.ledger.revs[base]) throw new CollabError(EXIT.PRECONDITION, `revision ${base} is not a revision of plan #${ctx.n}`);
   const summary = String(ctx.flags.summary && ctx.flags.summary !== true ? ctx.flags.summary : "").replace(/\s+/g, " ").trim().slice(0, 300) || "(no summary)";
   const ours = G.hashText(ctx.root, draft);
   let outcome = null;
@@ -673,12 +735,17 @@ async function edit(ctx) {
     return;
   }
   const l = ctx.ledger;
-  // The draft now stands on the new revision; a later edit starts from here.
-  try { if (path.resolve(ctx.root, fileArg) === draftFile(ctx)) writeDraft(ctx, blobText(ctx, l, l.current), l.current); else writeFileSync(baseFile(ctx), `${l.current}\n`); } catch { /* local convenience */ }
+  // Published from draft.md, or from the resolved conflict file: draft.md now is the new revision, so a
+  // later edit starts from it. From any other file, draft.md (if there is one) keeps its own base, so
+  // publishing it later merges its edits instead of undoing everyone else's.
+  try {
+    if (fromDraft || fromConflict) writeDraft(ctx, blobText(ctx, l, l.current), l.current);
+    if (fromConflict) rmSync(conflictFile, { force: true });
+  } catch { /* local convenience */ }
   // A comment per revision: editing the issue body notifies nobody.
   try {
     const diff = G.diffBlobs(ctx.root, l.revs[outcome.prev].blob, l.revs[l.current].blob);
-    const text = R ? R.revisionComment(l, l.current, diff, { prefix: R.messagePrefix(l, ctx.agent).replace(/^🤖s*/u, "") }) : `📝 Revision ${l.current}: ${summary}`;
+    const text = R ? R.revisionComment(l, l.current, diff, { prefix: R.messagePrefix(l, ctx.agent).replace(/^🤖\s*/u, "") }) : `📝 Revision ${l.current}: ${summary}`;
     gh.comment(ctx.repo, ctx.n, `<!-- collab:plan-rev rev=${l.current} -->\n${text}`, { auth: auth(ctx) });
   } catch (e) { ctx.warn(`could not post the revision comment (${e.message})`); }
   publish(ctx);
@@ -695,8 +762,12 @@ async function say(ctx) {
   requirePlanAgent(ctx);
   const l = ctx.ledger;
   if (l.phase === "closed") throw new CollabError(EXIT.UNSUPPORTED, `plan session #${ctx.n} is closed.`);
+  const status = PL.personStatus(l, ctx.login);
+  if (status === "left" || status === "removed") {
+    throw new CollabError(EXIT.UNSUPPORTED, `${ctx.login} ${status === "left" ? "left" : "was removed from"} plan session #${ctx.n}, so their agent doesn't post there.`);
+  }
   const raw = ctx.flags["body-file"] && ctx.flags["body-file"] !== true
-    ? ctx.h.readTextFile(ctx, ctx.flags["body-file"])
+    ? readPlanFile(ctx, ctx.flags["body-file"]).text
     : ctx.flags.body && ctx.flags.body !== true ? String(ctx.flags.body) : ctx.args.slice(1).join(" ");
   let body = G.normText(raw).trim();
   if (!body) throw new CollabError(EXIT.PRECONDITION, 'usage: collab plan say <n> --body "<message>" (or --body-file f)');
@@ -715,8 +786,14 @@ async function say(ctx) {
 async function agree(ctx) {
   ctx.n = issueNo(ctx);
   loadPlan(ctx);
+  // Inside an agent session the agreement is given through that agent, and recorded so: never as if
+  // the person typed it in their own terminal.
+  if (!ctx.agent && id.isAgentEnv(ctx.env)) {
+    throw new CollabError(EXIT.PRECONDITION, "inside an agent session, pass --agent <your id>: the agreement is recorded as given through you, after your human says yes");
+  }
   if (ctx.agent) requirePlanAgent(ctx);
   housekeeping(ctx);
+  requireOpenIssue(ctx);
   requireWrite(ctx);
   const via = ctx.agent ? `agent:${ctx.agent}` : "terminal";
   if (ctx.flags.withdraw) {
@@ -726,15 +803,30 @@ async function agree(ctx) {
     ctx.say(`Withdrew ${ctx.login}'s agreement to plan #${ctx.n}.`, { withdrawn: true });
     return;
   }
-  const rev = Number(ctx.flags.rev);
-  if (!Number.isSafeInteger(rev) || rev < 1) throw new CollabError(EXIT.PRECONDITION, "pass --rev N: the revision your human agreed to (collab plan show prints it)");
-  commitPlan(ctx, (cur) => [pev(ctx, "agree", { rev, hash: cur.revs?.[rev]?.hash ?? "", via })]);
+  const rev = intFlag(ctx, "rev", { what: "the revision your human agreed to (collab plan show prints it)" });
+  if (rev === undefined) throw new CollabError(EXIT.PRECONDITION, "pass --rev N: the revision your human agreed to (collab plan show prints it)");
+  const mine = ctx.ledger.agreements?.[ctx.login];
+  // Already recorded (the plan may be frozen by it): only make sure GitHub has the comment, which
+  // handoff looks for, in case posting it failed the first time.
+  const already = mine && mine.rev === rev && mine.hash === ctx.ledger.revs?.[rev]?.hash;
+  if (!already) commitPlan(ctx, (cur) => [pev(ctx, "agree", { rev, hash: cur.revs?.[rev]?.hash ?? "", via })]);
   const l = ctx.ledger;
+  let posted = true;
   try {
-    const text = R ? R.agreeComment(l, ctx.login, { rev, hash: l.revs[rev].hash, via }) : `<!-- collab:plan-agree login=${ctx.login} rev=${rev} hash=${l.revs[rev].hash} -->\n✅ Agrees: ${ctx.login} agrees to revision ${rev}.`;
-    gh.comment(ctx.repo, ctx.n, text, { auth: auth(ctx) });
-  } catch (e) { ctx.warn(`could not post the agreement comment (${e.message}); handoff checks for it, so run agree again later`); }
+    if (!already || missingAgreements(ctx, ctx.n, l, auth(ctx)).includes(ctx.login)) {
+      const agreedVia = already ? mine.via : via;
+      const text = R ? R.agreeComment(l, ctx.login, { rev, hash: l.revs[rev].hash, via: agreedVia }) : `<!-- collab:plan-agree login=${ctx.login} rev=${rev} hash=${l.revs[rev].hash} -->\n✅ Agrees: ${ctx.login} agrees to revision ${rev}.`;
+      gh.comment(ctx.repo, ctx.n, text, { auth: auth(ctx) });
+    }
+  } catch (e) {
+    posted = false;
+    ctx.warn(`could not post the agreement comment (${e.message}); handoff checks for it, so run this command again later`);
+  }
   publish(ctx);
+  if (already) {
+    ctx.say(`${ctx.login}'s agreement to revision ${rev} of plan #${ctx.n} was already recorded${posted ? "" : ", but its comment still isn't on GitHub"}.`, { rev, phase: l.phase, already: true, consensus: PL.consensus(l) });
+    return;
+  }
   ctx.say([
     `Recorded: ${ctx.login} agrees to revision ${rev} of plan #${ctx.n}.`,
     l.phase === "agreed" ? `Everyone agreed. Next: collab plan handoff ${ctx.n}${ctx.agent ? ` --agent ${ctx.agent}` : ""} opens the build PR.` : waitingLine(l),
@@ -813,20 +905,23 @@ async function status(ctx) {
 
 const slugify = (s) => String(s ?? "").toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 50).replace(/-+$/, "") || "plan";
 
-// Every agreement must also stand on GitHub: a comment by that login naming this revision and hash
-// (collab's agree comment, or the person's own /collab agree comment). That catches a hand-edited ledger.
-function auditAgreements(ctx) {
-  const l = ctx.ledger;
+// Every agreement must also stand on GitHub: a comment posted from that person's own account naming
+// this revision and hash (collab's agree comment, or their own /collab agree comment). A ledger
+// written by hand can't produce those. Returns the active people with no such comment.
+function missingAgreements(ctx, n, l, a) {
   const hash = l.revs[l.current].hash;
   const hex = hash.replace(/^sha256:/, "");
-  const comments = gh.commentsSince(ctx.repo, ctx.n, 0, { auth: auth(ctx) });
+  const comments = gh.commentsSince(ctx.repo, n, 0, { auth: a });
   const missing = [];
   for (const login of PL.activePeople(l)) {
     const ok = comments.some((c) => {
       if (String(c.login).toLowerCase() !== login.toLowerCase()) return false;
-      const m = /<!--\s*collab:plan-agree login=(\S+) rev=(\d+) hash=(sha256:[0-9a-f]{64})\s*-->/.exec(c.body ?? "");
+      const body = String(c.body ?? "");
+      const m = /<!--\s*collab:plan-agree login=(\S+) rev=(\d+) hash=(sha256:[0-9a-f]{64})\s*-->/.exec(body);
       if (m) return m[1].toLowerCase() === login.toLowerCase() && Number(m[2]) === l.current && m[3] === hash;
-      const d = /^\s*\/collab\s+agree\s+r(\d+)\s+([0-9a-f]{8,64})\b/im.exec(c.body ?? "");
+      // A /collab agree line inside one of collab's comments (a quoted diff, a notice) isn't one.
+      if (/<!--\s*collab:/i.test(body)) return false;
+      const d = /^ {0,3}\/collab\s+agree\s+r(\d+)\s+([0-9a-f]{8,64})\b/im.exec(body);
       return !!d && Number(d[1]) === l.current && hex.startsWith(d[2].toLowerCase());
     });
     if (!ok) missing.push(login);
@@ -845,27 +940,35 @@ async function handoff(ctx) {
     return;
   }
   if (l.phase !== "agreed") throw new CollabError(l.phase === "closed" ? EXIT.UNSUPPORTED : EXIT.PRECONDITION, `plan #${ctx.n} isn't agreed yet. ${waitingLine(l)}`);
+  requireOpenIssue(ctx);
   requireWrite(ctx);
-  const missing = auditAgreements(ctx);
+  const a = auth(ctx);
+  const missing = missingAgreements(ctx, ctx.n, l, a);
   if (missing.length) {
-    throw new CollabError(EXIT.PRECONDITION, `can't hand off: GitHub has no agreement comment for revision ${l.current} from ${missing.join(", ")}. Ask them to run \`collab plan agree ${ctx.n} --rev ${l.current}\` or comment \`/collab agree r${l.current} ${short(l.revs[l.current].hash)}\`.`, { missing });
+    throw new CollabError(EXIT.PRECONDITION, `can't hand off: GitHub has no agreement comment for revision ${l.current} from ${missing.join(", ")}. Ask them to run \`collab plan agree ${ctx.n} --rev ${l.current}\` again (it posts the missing comment) or comment \`/collab agree r${l.current} ${short(l.revs[l.current].hash)}\`.`, { missing });
   }
   const rev = l.current;
   const hash = l.revs[rev].hash;
   const text = blobText(ctx, l, rev);
-  const def = l.issue.defaultBranch;
+  // From GitHub, not the ledger: a ref anyone with write access can rewrite must not pick the base.
+  const def = gh.repoInfo(ctx.repo, { auth: a }).defaultBranch;
+  if (!/^[A-Za-z0-9._/-]+$/.test(String(def ?? "")) || String(def).startsWith("-")) throw new CollabError(EXIT.ENV, `GitHub returned an unusable default branch name for ${ctx.repo}`);
   // Not collab/plan-<n>: git would resolve that short name to the session's ref refs/collab/plan-<n>.
   const branch = `collab/plan-${ctx.n}-build`;
   const file = `docs/plans/${ctx.n}-${slugify(l.issue.title)}.md`;
-  const a = auth(ctx);
-  G.git(["fetch", "--no-tags", "origin", def], { cwd: ctx.root, auth: a });
-  // A branch left by an earlier attempt is reused when it already holds the agreed plan.
+  G.git(["fetch", "--no-tags", "origin", `+refs/heads/${def}:refs/remotes/origin/${def}`], { cwd: ctx.root, auth: a });
+  // A branch left by an earlier attempt is reused only when it is exactly what handoff makes: one
+  // commit, on the default branch, adding nothing but the agreed plan.
   const remote = G.git(["ls-remote", "origin", `refs/heads/${branch}`], { cwd: ctx.root, auth: a, allowFail: true }).stdout.trim();
   if (remote) {
-    G.git(["fetch", "--no-tags", "origin", `+refs/heads/${branch}:refs/collab-cache/${cacheAs(ctx)}/branch-plan-${ctx.n}`], { cwd: ctx.root, auth: a });
-    const there = G.showFile(ctx.root, `refs/collab-cache/${cacheAs(ctx)}/branch-plan-${ctx.n}`, file);
-    if (there === null || sha(there) !== hash) {
-      throw new CollabError(EXIT.PRECONDITION, `the branch ${branch} already exists on origin and doesn't hold the agreed plan. Delete it (or ask its owner), then run handoff again.`);
+    const cached = `refs/collab-cache/${cacheAs(ctx)}/branch-plan-${ctx.n}`;
+    G.git(["fetch", "--no-tags", "origin", `+refs/heads/${branch}:${cached}`], { cwd: ctx.root, auth: a });
+    const there = G.showFile(ctx.root, cached, file);
+    const parents = G.git(["rev-list", "--parents", "-n", "1", cached], { cwd: ctx.root }).stdout.trim().split(/\s+/).slice(1);
+    const touched = G.git(["diff-tree", "--no-commit-id", "--name-only", "-r", cached], { cwd: ctx.root }).stdout.trim().split(/\r?\n/).filter(Boolean);
+    const onDefault = parents.length === 1 && G.git(["merge-base", "--is-ancestor", parents[0], `refs/remotes/origin/${def}`], { cwd: ctx.root, allowFail: true }).code === 0;
+    if (there === null || sha(there) !== hash || !onDefault || touched.length !== 1 || touched[0] !== file) {
+      throw new CollabError(EXIT.PRECONDITION, `the branch ${branch} already exists on origin and isn't just the agreed plan on ${def}. Delete it (or ask its owner), then run handoff again.`);
     }
   } else {
     const commit = G.commitFileOnto(ctx.root, {
@@ -886,7 +989,12 @@ async function handoff(ctx) {
     "",
     `Closes #${ctx.n}`,
   ].join("\n");
-  const pr = gh.findOpenPr(ctx.repo, branch, { auth: a }) ?? gh.createPr(ctx.repo, { base: def, head: branch, title: `Build: ${l.issue.title}`, body, draft: true }, { auth: a });
+  const open = gh.findOpenPr(ctx.repo, branch, { auth: a });
+  if (open) {
+    const base = gh.getPr(ctx.repo, open.number, { auth: a }).baseRef;
+    if (base !== def) throw new CollabError(EXIT.PRECONDITION, `PR #${open.number} from ${branch} targets ${base}, not ${def}. Close it, then run handoff again.`);
+  }
+  const pr = open ?? gh.createPr(ctx.repo, { base: def, head: branch, title: `Build: ${l.issue.title}`, body, draft: true }, { auth: a });
   commitPlan(ctx, (cur) => (cur.phase === "handed-off" ? [] : [pev(ctx, "handoff", { pr: pr.number, url: pr.url, branch, path: file, rev, hash })]));
   l = ctx.ledger;
   const events = [];
@@ -918,10 +1026,12 @@ async function close(ctx) {
   const as = ownerOrAdmin(ctx);
   if (ctx.ledger.phase !== "closed") commitPlan(ctx, () => [pev(ctx, "state.set", { phase: "closed", reason: String(ctx.flags.reason && ctx.flags.reason !== true ? ctx.flags.reason : "closed by the owner").slice(0, 300), ...as }, { agent: null })]);
   const l = ctx.ledger;
+  const events = [];
   try {
-    gh.comment(ctx.repo, ctx.n, `<!-- collab:notice key=closed -->\n⚫ Closed: ${ctx.login} closed this plan session at revision ${l.current}.`, { auth: auth(ctx) });
+    ensureNotice(ctx, "closed", `⚫ Closed: ${ctx.login} closed this plan session at revision ${l.current}.`, events);
     gh.closeIssue(ctx.repo, ctx.n, { reason: l.handoff ? "completed" : "not_planned" }, { auth: auth(ctx) });
   } catch (e) { ctx.warn(`could not close issue #${ctx.n} (${e.message})`); }
+  if (events.length) { try { commitPlan(ctx, () => events); } catch (e) { if (!isCollabError(e)) throw e; } }
   publish(ctx);
   ctx.say(`Closed plan session #${ctx.n} at revision ${l.current}.`, { phase: l.phase });
 }
@@ -962,9 +1072,13 @@ export function planForPr(ctx, { body, prNumber, headRef, auth: a, cacheAgent })
   const cur = store.read({ cwd: ctx.root, pr: issue, agent: cacheAgent, auth: a, kind: KIND });
   const l = cur?.ledger;
   const r = l?.revs?.[rev];
-  const ok = l && ["agreed", "handed-off", "closed"].includes(l.phase) && l.handoff?.pr === prNumber && l.handoff.rev === rev && r?.hash === `sha256:${hex}`;
+  const ok = l && ["handed-off", "closed"].includes(l.phase) && l.handoff?.pr === prNumber && l.handoff.rev === rev && l.current === rev && r?.hash === `sha256:${hex}`;
   if (!ok) return { rejected: `the PR names plan #${issue}, but that plan's ledger doesn't confirm it was handed off to this PR` };
   const text = G.blobText(ctx.root, r.blob);
+  if (sha(text) !== r.hash) return { rejected: `revision ${rev} of plan #${issue} doesn't match its recorded hash` };
+  // The same check handoff makes: each agreement is a comment from that person's own account.
+  const missing = missingAgreements(ctx, issue, l, a);
+  if (missing.length) return { rejected: `plan #${issue} has no agreement comment on GitHub from ${missing.join(", ")}` };
   let changedOnBranch = null;
   try {
     const onBranch = G.showFile(ctx.root, `origin/${headRef}`, l.handoff.path);

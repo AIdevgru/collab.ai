@@ -85,8 +85,13 @@ test("an agreed plan is frozen until the owner reopens it from their own termina
   const edit = p.plan("alice", "edit", n, ["--summary", "late"]);
   assert.equal(edit.code, 2, edit.out);
   assert.match(edit.out, /frozen/);
-  const agree = p.plan("alice", "agree", n, ["--rev", "3"]);
-  assert.equal(agree.code, 2, agree.out);
+  // Agreeing again changes nothing: it only re-posts an agreement comment that never made it to GitHub.
+  const agreeComments = () => p.comments(n).filter((c) => c.login === "alice" && /plan-agree|\/collab agree/.test(c.body)).length;
+  const before = agreeComments();
+  const again = p.plan("alice", "agree", n, ["--rev", "3"]);
+  ok(again);
+  assert.match(again.out, /already recorded/);
+  assert.equal(agreeComments(), before);
 
   const inAgent = p.run("zwymer", ["plan", "reopen", String(n)], { CLAUDECODE: "1" });
   assert.equal(inAgent.code, 2, inAgent.out);
@@ -111,4 +116,38 @@ test("--people sets how many people must agree", () => {
   const solo = p.start("Solo plan", ["--people", "1"]).n;
   ok(p.plan("zwymer", "agree", solo, ["--rev", "1"]));
   assert.equal(p.ledger(solo).phase, "agreed");
+});
+
+test("--rev with no value is refused instead of agreeing to revision 1", () => {
+  const m = p.start("Flag check").n;
+  p.join("alice", m);
+  const r = p.plan("alice", "agree", m, ["--rev"]);
+  assert.equal(r.code, 2, r.out);
+  assert.match(r.out, /--rev needs/);
+  assert.ok(!p.ledger(m).agreements.alice);
+  const people = p.run("zwymer", ["plan", "new", "--title", "No value", "--tool", "claude", "--people"]);
+  assert.equal(people.code, 2, people.out);
+});
+
+test("inside an agent session, agree without --agent is refused, so it is never recorded as the person's terminal", () => {
+  const m = p.start("Via check").n;
+  p.join("alice", m);
+  const r = p.run("alice", ["plan", "agree", String(m), "--rev", "1"], { CLAUDECODE: "1" });
+  assert.equal(r.code, 2, r.out);
+  assert.match(r.out, /pass --agent/);
+  ok(p.plan("alice", "agree", m, ["--rev", "1"]));
+  assert.equal(p.ledger(m).agreements.alice.via, `agent:${p.ids[m].alice}`);
+});
+
+test("someone who joins an agreed plan only watches: wait keeps waiting instead of returning at once", () => {
+  const m = p.start("Observer", ["--people", "1"]).n;
+  ok(p.plan("zwymer", "agree", m, ["--rev", "1"]));
+  p.join("alice", m);
+  assert.equal(p.ledger(m).people.alice.observer, true);
+  ok(p.plan("alice", "show", m));
+  const t0 = Date.now();
+  const w = p.plan("alice", "wait", m, ["--timeout", "1500ms", "--poll", "300"]);
+  ok(w);
+  assert.match(w.out, /Next: wait/);
+  assert.ok(Date.now() - t0 >= 1400, `returned after ${Date.now() - t0} ms`);
 });

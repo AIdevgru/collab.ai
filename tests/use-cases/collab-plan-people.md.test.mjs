@@ -6,7 +6,7 @@ import { ok, planSetup } from "../helpers/plan-env.mjs";
 let p;
 let n;
 before(() => {
-  p = planSetup({ people: { alice: "write", bob: "write" } });
+  p = planSetup({ people: { alice: "write", bob: "write", carol: "admin" } });
   n = p.start("Add SSO login").n;
   p.join("alice", n);
   p.join("bob", n);
@@ -16,6 +16,8 @@ after(() => p.cleanup());
 test("a person leaves and comes back; the owner can't leave", () => {
   ok(p.plan("alice", "leave", n));
   assert.ok(p.ledger(n).people.alice.left);
+  const quiet = p.plan("alice", "say", n, ["--body", "still here?"]);
+  assert.equal(quiet.code, 4, quiet.out);
   const owner = p.plan("zwymer", "leave", n);
   assert.equal(owner.code, 2, owner.out);
   p.join("alice", n);
@@ -80,4 +82,14 @@ test("list finds a session whose label was removed, and hides closed ones unless
   const all = p.json("alice", ["plan", "list", "--all"]);
   ok(all);
   assert.ok(all.data.sessions.some((x) => x.number === n));
+});
+
+test("a repo admin who never joined can close a session from their own terminal", () => {
+  const k = p.start("Fourth plan").n;
+  p.s.person("carol");
+  ok(p.run("carol", ["plan", "close", String(k)]));
+  const l = p.ledger(k);
+  assert.equal(l.phase, "closed");
+  assert.equal(l.closed.by, "carol");
+  assert.ok(!l.people.carol, "carol didn't have to join");
 });

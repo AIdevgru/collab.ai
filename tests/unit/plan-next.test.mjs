@@ -147,10 +147,10 @@ describe("planNext: 5. agreed", () => {
     assert.deepEqual(r.cmd, cmd("handoff", CODEX));
     assert.equal(r.why, `everyone agreed to revision 2 (${hash("two").slice(7, 15)}) of plan #57: hand it off to a build PR`);
   });
-  test("an observer (joined after the agreement) only waits", () => {
+  test("an observer (joined after the agreement) only waits, so plan wait keeps polling", () => {
     const F = apply(agreed(), join(CAROL, GROK, "grok", 30));
     const r = planNext(F, GROK, seenOf(F));
-    assert.equal(r.action, "agreed");
+    assert.equal(r.action, "wait");
     assert.deepEqual(r.cmd, cmd("wait", GROK));
     assert.equal(r.why, "everyone agreed to revision 2 of plan #57; carol joined after that and only watches until the owner reopens it");
   });
@@ -165,10 +165,10 @@ describe("planNext: 6. wait", () => {
     assert.deepEqual(r.cmd, cmd("wait", CODEX));
     assert.equal(r.why, `waiting for zwymer to agree to revision 2 (${hash("two").slice(7, 15)}) of plan #57`);
   });
-  test("when my person is awaited, says that the agent can't agree for them", () => {
+  test("when my person is awaited, says to ask them and agree only after their yes", () => {
     const L = duo();
     const r = planNext(L, CODEX, seenOf(L));
-    assert.equal(r.why, `waiting for alice (the person you act for) and zwymer to agree to revision 2 (${hash("two").slice(7, 15)}) of plan #57; you can't agree for alice: show them the plan, and they agree themselves`);
+    assert.equal(r.why, `waiting for alice (the person you act for) and zwymer to agree to revision 2 (${hash("two").slice(7, 15)}) of plan #57; show alice the plan and ask them; run collab plan agree only after they say yes to this revision`);
   });
   test("lists three or more people with commas", () => {
     const L = run(duo(), join(BOB, GEMINI, "gemini", 11));

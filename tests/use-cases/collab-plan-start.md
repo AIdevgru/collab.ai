@@ -13,6 +13,7 @@ Zach wants to settle how SSO login should work before anyone builds it. Alice an
    - text over 50,000 characters;
    - text containing `<!-- collab:`, collab's own marker;
    - text that is empty.
+   - a file outside the repo's `.collab/` folder, such as `test/ok.test.mjs`: plan files are published to GitHub, so collab reads them only from there.
 4. Alice runs `/collab plan` in her own clone, pinned to her account `alice`. Claude runs `collab plan list`, which finds #2 through its ref and the `collab-plan` label and lists its revision and who it's waiting on. Alice picks it, and Claude runs `collab plan join 2 --tool claude`.
    - collab checks that `alice` has write access, registers her as a person with her agent, and posts "👋 Joined: alice joined…" from **her** account. That comment subscribes her to the issue.
    - The output names her agent id and says who the plan is waiting on.

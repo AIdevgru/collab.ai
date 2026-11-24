@@ -15,3 +15,4 @@ Plan session #2 ("Add SSO login") is agreed at revision 2 by Zach and Alice.
    - the agreed text comes from the plan's own ref, under `untrusted.plan`;
    - the planner splits that plan into tasks.
 6. A PR whose body copies the `collab:plan-source` marker but that the plan's ledger doesn't name gets `planSource: null` and a warning, so a forged marker can't push a plan in front of the planner.
+7. **A prepared branch.** If `collab/plan-<n>-build` already exists with more on it than the agreed plan (say, extra code), handoff refuses it and changes nothing. It reuses an existing branch only when that is one commit on the default branch adding just the plan file, and it adopts an open PR from it only if that PR targets the default branch.

@@ -207,12 +207,12 @@ describe("plan apply: refusal order and exit codes", () => {
   test("an unknown type is refused before membership is checked", () => {
     refused(() => apply(duo(), ev("task.explode", "ghost")), EXIT.PRECONDITION, /ghost can't task.explode: unknown event type task.explode/);
   });
-  test("every type but plan.join, directive, comments.seen and notice.sent needs a person", () => {
+  test("every type but plan.join, directive, comments.seen, notice.sent and an admin's owner operation needs a person", () => {
     const L = duo();
     for (const make of [
       () => ev("agent.seen", "ghost", null), (l) => revAdd(l, "ghost", null, "x"), (l) => agree(l, "ghost", null),
-      () => ev("agree.withdraw", "ghost"), () => ev("person.leave", "ghost"), () => ev("reopen", "ghost", null, { asAdmin: true }),
-      () => close(30, "ghost", { asAdmin: true }),
+      () => ev("agree.withdraw", "ghost"), () => ev("person.leave", "ghost"), () => ev("reopen", "ghost"),
+      () => close(30, "ghost"),
     ]) {
       const e = make(L);
       refused(() => apply(L, e), EXIT.PRECONDITION, /ghost has not joined plan #57; run collab plan join 57/);
@@ -223,6 +223,9 @@ describe("plan apply: refusal order and exit codes", () => {
     ]) {
       assert.doesNotThrow(() => apply(L, e), e.type);
     }
+    // A repo admin (the CLI checks the permission and sets asAdmin) needn't join to close or reopen.
+    assert.equal(apply(L, close(30, "ghost", { asAdmin: true })).closed.by, "ghost");
+    refused(() => apply(L, ev("reopen", "ghost", null, { asAdmin: true })), EXIT.PRECONDITION, /only an agreed plan can be reopened/);
   });
   test("an agent, when given, must be registered under that login", () => {
     const L = duo();

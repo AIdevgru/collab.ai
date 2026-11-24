@@ -319,10 +319,11 @@ People agree on *what* to build before agents build it. Each person uses their o
   - If the plan block in the description no longer matches the current revision, collab leaves it, warns in the status block, and posts one notice with the diff.
   - Agreements bind to the hash on the ref, never to the body. The next revision replaces the edited text.
 - **Handoff:**
-  - `plan handoff` first checks that GitHub has an agreement comment for the current revision from every person, which catches a hand-edited ledger.
+  - `plan handoff` first checks that GitHub has an agreement comment for the current revision from every person, and that the agreed text matches its recorded hash (every read of a revision checks this). The default branch comes from GitHub, not the ledger, and an existing build branch is reused only when it is one commit on that branch adding just the plan file.
   - It builds a commit on `origin/<default>` with git plumbing (a temporary index, so the checkout is untouched) that adds `docs/plans/<n>-<slug>.md`, and pushes it to `collab/plan-<n>-build`. That is not `collab/plan-<n>`, because git would resolve that short name to the session's ref `refs/collab/plan-<n>`.
   - It opens a draft PR "Build: <title>" whose body has a `collab:plan-source issue=… rev=… sha256=…` marker and "Closes #n".
-  - `collab context` on that PR returns `planSource` and the agreed text under `untrusted.plan`, but only when the plan's own ledger names this PR and the revision and hash match. A copied marker gets `null` and a warning.
+  - `collab context` on that PR returns `planSource` and the agreed text under `untrusted.plan`, but only when the plan's own ledger names this PR, the revision and hash match, the text matches the hash, and every agreement has its comment. A copied marker gets `null` and a warning.
+- **What this protects against:** mistakes, and people without write access. Like the rest of collab, it is not a defence against someone with write access: they can rewrite `refs/collab/plan-<n>` (custom refs can't be protected), edit others' comments, or drop a person from a hand-written ledger. The hash and comment checks only make such a change harder to miss.
 - **Known limit:** the build that follows is a normal PR collab, which is single-account: the person who runs `/collab <PR>` and their agents build it.
 
 ## Repo layout

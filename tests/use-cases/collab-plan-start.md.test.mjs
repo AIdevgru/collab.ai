@@ -62,6 +62,12 @@ test("plan text that is too long, empty or holds collab's markers is refused bef
   assert.equal(Object.keys(p.s.fake.read().issues).length, before);
 });
 
+test("plan files are read only from the repo's .collab/ folder, since their text is published", () => {
+  const r = p.run("zwymer", ["plan", "new", "--title", "Leak", "--tool", "claude", "--body-file", "test/ok.test.mjs"]);
+  assert.equal(r.code, 2, r.out);
+  assert.match(r.out, /\.collab\/ folder/);
+});
+
 test("someone else lists the open sessions and joins one from their own account", () => {
   const list = p.json("alice", ["plan", "list"]);
   ok(list);

@@ -1,5 +1,7 @@
 // Use case: tests/use-cases/collab-plan-handoff.md
 import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { after, before, test } from "node:test";
 import { sh } from "../helpers/bare-remote.mjs";
 import { ok, planSetup, sha } from "../helpers/plan-env.mjs";
@@ -95,4 +97,23 @@ test("a copied plan-source marker on another PR is ignored", () => {
   assert.equal(out.planSource, null);
   assert.equal(out.untrusted.plan, null);
   assert.match(c.stderr, /doesn't confirm/);
+});
+
+test("a build branch someone prepared with more than the plan on it is refused", () => {
+  const m = p.start("Prepared branch", ["--people", "1"]).n;
+  ok(p.plan("zwymer", "agree", m, ["--rev", "1"]));
+  const dir = p.s.clone("mallory");
+  const branch = `collab/plan-${m}-build`;
+  sh(["fetch", "-q", "origin", "main"], dir);
+  sh(["checkout", "-q", "-B", branch, "origin/main"], dir);
+  mkdirSync(path.join(dir, "docs", "plans"), { recursive: true });
+  writeFileSync(path.join(dir, "docs", "plans", `${m}-prepared-branch.md`), p.raw("zwymer", m));
+  writeFileSync(path.join(dir, "extra.mjs"), "export default 1;\n");
+  sh(["add", "-A"], dir);
+  sh(["commit", "-q", "-m", "prepared"], dir);
+  sh(["push", "-q", "origin", branch], dir);
+  const r = p.plan("zwymer", "handoff", m);
+  assert.equal(r.code, 2, r.out);
+  assert.match(r.out, /isn't just the agreed plan/);
+  assert.equal(p.ledger(m).phase, "agreed");
 });

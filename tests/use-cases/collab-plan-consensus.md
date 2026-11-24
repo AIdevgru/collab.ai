@@ -20,7 +20,12 @@ Plan session #2 has two people, Zach and Alice, and the plan is at revision 2.
    - While the session is `agreed`, `collab plan edit` and `collab plan agree` are refused.
    - The owner, in their own terminal, runs `collab plan reopen 2`. That clears the agreements, and the plan can change again.
    - `reopen` is refused inside an agent session.
+   - Running `collab plan agree` again for an agreement already recorded changes nothing. It only re-posts the agreement comment if that never reached GitHub, which handoff needs.
 7. **Minimum number of people.** A session created with `--people 2` isn't agreed when only its owner has joined and agreed. With `--people 1` it is, so one person planning with their agents can finish.
 8. **`next` and `wait`:**
    - while others still have to agree, they say `wait` and name who;
    - after agreement they say `agreed` and suggest `collab plan handoff 2`.
+9. **Mistakes that can't record an agreement:**
+   - `--rev` with no value is refused; it doesn't quietly mean revision 1. `--people` and `--base` work the same way.
+   - Inside an agent session, `collab plan agree` needs `--agent`, so an agreement an agent recorded is never labelled as typed in the person's own terminal.
+10. **Watching an agreed plan.** Someone who joins after everyone agreed only watches until the owner reopens it. Their agent's `collab plan wait` keeps waiting instead of returning at once.

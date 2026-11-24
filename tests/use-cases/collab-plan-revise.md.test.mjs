@@ -113,6 +113,10 @@ test("edits to the same line conflict: nothing is published until it's resolved"
   const done = p.planJson("zwymer", "edit", n, ["--body-file", ".collab/plans/2/draft.conflict.md", "--base", "5", "--summary", "Both contexts"]);
   ok(done);
   assert.equal(done.data.rev, 6);
+  // draft.md now is revision 6: a later pull or edit starts from it, so nothing published gets undone.
+  assert.equal(p.readDraft("zwymer", n), p.raw("zwymer", n));
+  assert.ok(!existsSync(p.draftPath("zwymer", n, "draft.conflict.md")));
+  ok(p.plan("zwymer", "pull", n));
 });
 
 test("a CRLF draft that matches the current revision has nothing to publish", () => {
@@ -142,4 +146,14 @@ test("a browser edit of the plan is kept, noticed once, and replaced by the next
   body = p.issue(n).body;
   assert.doesNotMatch(body, /BROWSER EDIT/);
   assert.match(body, /Passwordless email links/);
+});
+
+test("an edited revision number in the description can't freeze the plan block", () => {
+  p.s.browserEdit(n, (b) => b.replace(/<!-- collab:plan-doc:start seq=\d+ -->[\s\S]*<!-- collab:plan-doc:end -->/, "<!-- collab:plan-doc:start seq=99 -->\nFAKE PLAN TEXT\n<!-- collab:plan-doc:end -->"));
+  const r = p.revise("alice", n, (t) => t.replace("## Open questions\n", "## Open questions\n\nWhich IdPs first?\n"), "Questions");
+  ok(r);
+  const body = p.issue(n).body;
+  assert.doesNotMatch(body, /FAKE PLAN TEXT/);
+  assert.match(body, /Which IdPs first\?/);
+  assert.equal(p.comments(n).filter((c) => c.body.includes(`key=forged-doc:r${r.data.rev}`)).length, 1);
 });

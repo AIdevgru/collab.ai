@@ -71,7 +71,7 @@ export function planNext(ledger, me, seen, { issueState = "OPEN", newComments = 
   // 5. Agreed: hand it off. Someone who joined after the agreement only watches.
   if (L.phase === "agreed") {
     if (status !== "active") {
-      return say("agreed", `everyone agreed to revision ${L.current} of plan #${n}; ${login} joined after that and only watches until the owner reopens it`, c("wait"));
+      return say("wait", `everyone agreed to revision ${L.current} of plan #${n}; ${login} joined after that and only watches until the owner reopens it`, c("wait"));
     }
     return say("agreed", `everyone agreed to revision ${L.current} (${short(cur?.hash)}) of plan #${n}: hand it off to a build PR`, c("handoff"));
   }
@@ -86,7 +86,7 @@ function waitWhy(L, login, n, cur) {
   if (cs.waitingOn.length) {
     const names = cs.waitingOn.map((l) => (l === login ? `${l} (the person you act for)` : l));
     let part = `waiting for ${list(names)} to agree to revision ${L.current} (${short(cur?.hash)}) of plan #${n}`;
-    if (cs.waitingOn.includes(login)) part += `; you can't agree for ${login}: show them the plan, and they agree themselves`;
+    if (cs.waitingOn.includes(login)) part += `; show ${login} the plan and ask them; run collab plan agree only after they say yes to this revision`;
     parts.push(part);
   } else {
     parts.push(`everyone in plan #${n} so far agreed to revision ${L.current} (${short(cur?.hash)})`);

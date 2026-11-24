@@ -21,6 +21,9 @@ const FROZEN_REFUSED = new Set(["rev.add", "agree", "agree.withdraw", "person.le
 const CLOSED_OK = new Set(["comments.seen", "notice.sent", "agent.seen", "directive"]);
 // Events whose login need not be a person in the session (yet).
 const ANY_LOGIN = new Set(["plan.join", "directive", "comments.seen", "notice.sent"]);
+// Owner operations a repo admin may make without joining (the CLI checks the permission and sets
+// data.asAdmin), say to close a session whose owner is gone.
+const ADMIN_OPS = new Set(["person.remove", "reopen", "state.set"]);
 
 const HASH_RE = /^sha256:[0-9a-f]{64}$/;
 const BLOB_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -406,7 +409,8 @@ export function apply(ledger, event) {
   if (!handler) refuse(ev, `unknown event type ${ev.type}`);
 
   const n = ledger.issue?.number;
-  if (!ANY_LOGIN.has(ev.type)) {
+  const adminOp = ADMIN_OPS.has(ev.type) && ev.data.asAdmin === true && ev.agent == null;
+  if (!ANY_LOGIN.has(ev.type) && !adminOp) {
     if (!own(ledger.people, ev.login)) refuse(ev, `${ev.login} has not joined plan #${n}; run collab plan join ${n}`);
     if (ev.agent != null) {
       const ag = own(ledger.agents, ev.agent);
