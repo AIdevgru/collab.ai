@@ -6,11 +6,17 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { parseArgs } from "./args.mjs";
 import { CollabError, EXIT } from "./errors.mjs";
 
 export const RELAY_ALLOW = Object.freeze([
   "join", "context", "plan", "prompt", "next", "wait", "status", "claim", "push", "sync", "verify",
   "submit", "release", "review-claim", "review", "diff", "merge", "add", "cancel", "note", "block", "unblock", "dashboard",
+]);
+// `collab plan <sub>` (plan sessions) the relay runs. No subcommand is the PR planner's
+// `collab plan --tasks`. Owner commands (close, remove, reopen) need the owner's own terminal.
+export const RELAY_PLAN_ALLOW = Object.freeze([
+  "list", "new", "join", "pull", "show", "edit", "say", "agree", "leave", "next", "wait", "status", "handoff",
 ]);
 // Flags whose value is a file path the relay will read, so it must stay inside the repo.
 const PATH_FLAGS = new Set(["--tasks", "--body-file", "--message-file"]);
@@ -143,6 +149,13 @@ export function validate(repoRoot, req, { fixedAgent = null, key = null, seen = 
   }
   const cmd = req.argv[0];
   if (!RELAY_ALLOW.includes(cmd)) return bad(`the relay does not run \`collab ${cmd ?? ""}\` (owner and setup commands need a real terminal)`);
+  if (cmd === "plan") {
+    // The same parser the CLI uses, so the relay and the CLI agree on which word is the subcommand.
+    const sub = parseArgs(req.argv).pos[0];
+    if (sub !== undefined && !RELAY_PLAN_ALLOW.includes(sub)) {
+      return bad(`the relay does not run \`collab plan ${sub}\` (owner commands need the owner's own terminal)`);
+    }
+  }
   if (typeof req.cwd !== "string" || !inside(repoRoot, req.cwd)) return bad("relay request cwd is outside the repo");
   const cwdAbs = longPath(path.resolve(repoRoot, req.cwd));
   for (let i = 0; i < req.argv.length; i++) {

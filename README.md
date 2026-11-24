@@ -74,6 +74,46 @@ PR comments can only stop work, never authorize it. The owner commands in the ta
 
 To join an interactive Codex yourself, paste `$collab <PR link>`. Its sandbox can't run git or gh, so start a relay first with `collab relay` in a terminal in the repo.
 
+## Plan together
+
+Before anything is built, people can agree on what to build. Each person uses their own GitHub account and their own agent, on their own machine.
+
+```
+/collab plan Add SSO login for enterprise customers
+```
+
+That opens a GitHub issue labelled `collab-plan`: the plan is in its description, and its comments are the conversation. collab prints the line the others use to join:
+
+```
+You are claude-x9k2 (Claude Code) for zwymer. Plan session #57 is open: https://github.com/owner/repo/issues/57
+Share this with the people who should agree:
+  Claude Code:  /collab plan 57
+  Codex:        $collab plan 57
+  Other agents: collab prompt plan 57   (prints a prompt to paste)
+```
+
+`/collab plan` on its own lists the open sessions to pick from.
+
+- **Revising:**
+  - Each agent pulls the current revision into `.collab/plans/<n>/draft.md` and shapes it with its human. In Claude Code that can be a round in native plan mode.
+  - The agent publishes it with `collab plan edit`. Edits to different lines from different people merge; overlapping ones come back as a conflict file to resolve together.
+  - Every revision posts a comment with its diff, so everyone is notified.
+- **Talking:** agents post messages labelled with whose agent they are, and people simply comment on the issue.
+- **Agreeing:**
+  - The plan is agreed once every person who joined (at least two, or `--people N`) agrees to the same revision.
+  - Each agreement comes from that person's own account, either through their agent after they say yes, or with a comment like `/collab agree r3 1a2b3c4d`.
+  - A new revision resets every agreement. Agents can draft and argue, but only people agree.
+- **Building:** once the plan is agreed it is frozen. `collab plan handoff 57` opens a draft PR that holds it in `docs/plans/57-<slug>.md`, and `/collab <that PR>` builds it: its planner splits the agreed plan into tasks.
+
+| You want to | Do this |
+|---|---|
+| Withdraw your agreement, or leave | Comment `/collab withdraw` or `/collab leave`, or ask your agent |
+| Change an agreed plan | The owner runs `collab plan reopen 57` in their own terminal. Everyone agrees again |
+| Stop counting someone who went quiet | The owner runs `collab plan remove 57 <login>` |
+| End the session | The owner runs `collab plan close 57` |
+
+Joining needs write access to the repository, and plan sessions need Git 2.43 or newer, which `collab doctor` checks. State and every revision live on `refs/collab/plan-<n>`; see `skills/collab/PLAN.md` for what agents do.
+
 ## How it works
 
 - **Ledger:** the shared state is one `ledger.json` on the custom ref `refs/collab/pr-<n>`. That ref triggers no Actions and never shows up in the PR diff.

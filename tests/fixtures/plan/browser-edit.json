@@ -1,0 +1,107 @@
+{
+  "ledger": {
+    "schema": 1,
+    "kind": "plan",
+    "seq": 4,
+    "rev": null,
+    "issue": {
+      "repo": "o/r",
+      "number": 57,
+      "url": "https://github.com/o/r/issues/57",
+      "title": "Cache the API responses",
+      "defaultBranch": "main"
+    },
+    "owner": "zwymer",
+    "phase": "drafting",
+    "current": 2,
+    "minPeople": 2,
+    "maxChars": 50000,
+    "revs": {
+      "1": {
+        "hash": "sha256:1bb5f9148437939944690392e70862f63049f3ae024849f35ed8c0ed5cbff793",
+        "blob": "dd6a6d4561b9f86c1e58c5860de2d9f0a9dc3800",
+        "base": 0,
+        "merged": false,
+        "agent": "claude-a1f3",
+        "login": "zwymer",
+        "summary": "First draft",
+        "chars": 77,
+        "at": "2026-11-16T12:00:00.000Z"
+      },
+      "2": {
+        "hash": "sha256:057f8ddb3f34457c06dc714a7c81679f794be817783430919b37fe8b0a926dec",
+        "blob": "1622a6b952cb83fe5a2e4cb91bfb1c24f8bb3266",
+        "base": 1,
+        "merged": false,
+        "agent": "codex-7k2p",
+        "login": "alice",
+        "summary": "Use Redis, and evict the least recently used entry",
+        "chars": 157,
+        "at": "2026-11-16T12:20:00.000Z"
+      }
+    },
+    "people": {
+      "zwymer": {
+        "joinedAt": "2026-11-16T12:00:00.000Z",
+        "lastSeen": "2026-11-16T12:25:00.000Z",
+        "observer": false,
+        "left": null,
+        "removed": null
+      },
+      "alice": {
+        "joinedAt": "2026-11-16T12:05:00.000Z",
+        "lastSeen": "2026-11-16T12:20:00.000Z",
+        "observer": false,
+        "left": null,
+        "removed": null
+      }
+    },
+    "agents": {
+      "claude-a1f3": {
+        "tool": "claude",
+        "vendor": "anthropic",
+        "login": "zwymer",
+        "host": "pc",
+        "joinedAt": "2026-11-16T12:00:00.000Z",
+        "lastSeen": "2026-11-16T12:25:00.000Z"
+      },
+      "codex-7k2p": {
+        "tool": "codex",
+        "vendor": "openai",
+        "login": "alice",
+        "host": "pc",
+        "joinedAt": "2026-11-16T12:05:00.000Z",
+        "lastSeen": "2026-11-16T12:20:00.000Z"
+      },
+      "gemini-9z9z": {
+        "tool": "gemini",
+        "vendor": "google",
+        "login": "alice",
+        "host": "pc",
+        "joinedAt": "2026-11-16T12:06:00.000Z",
+        "lastSeen": "2026-11-16T12:06:00.000Z"
+      }
+    },
+    "agreements": {
+      "zwymer": {
+        "rev": 2,
+        "hash": "sha256:057f8ddb3f34457c06dc714a7c81679f794be817783430919b37fe8b0a926dec",
+        "at": "2026-11-16T12:25:00.000Z",
+        "via": "agent:claude-a1f3",
+        "commentId": 0,
+        "url": null
+      }
+    },
+    "directives": [],
+    "lastCommentId": 0,
+    "lastCommentAt": null,
+    "notices": {},
+    "handoff": null,
+    "agreedAt": null,
+    "closed": null
+  },
+  "now": "2026-11-16T12:30:00.000Z",
+  "options": {
+    "browserEdit": true
+  }
+}

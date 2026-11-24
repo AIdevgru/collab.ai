@@ -1,4 +1,5 @@
-// PR references, the supported-PR check, the dashboard splice and the CI filter probe.
+// PR and issue references, the supported-PR check, the marked-block splice (dashboard and plan
+// blocks) and the CI filter probe.
 
 import { CollabError, EXIT } from "./errors.mjs";
 import { lsFiles, showFile } from "./git.mjs";
@@ -26,10 +27,29 @@ export function parsePrRef(arg, defaultRepo) {
   throw new CollabError(EXIT.PRECONDITION, `not a PR reference: "${s}". ${usage}`);
 }
 
-function toNumber(digits, s, usage) {
+function toNumber(digits, s, usage, noun = "PR") {
   const n = Number(digits);
-  if (!Number.isSafeInteger(n) || n <= 0) throw new CollabError(EXIT.PRECONDITION, `not a PR number: "${s}". ${usage}`);
+  if (!Number.isSafeInteger(n) || n <= 0) throw new CollabError(EXIT.PRECONDITION, `not a${noun === "issue" ? "n" : ""} ${noun} number: "${s}". ${usage}`);
   return n;
+}
+
+const ISSUE_URL_RE = /^(?:https?:\/\/)?(?:www\.)?github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/(?:issues|pull)\/(\d+)(?:[/?#].*)?$/i;
+
+// Accepts https://github.com/o/r/issues/57 (or /pull/57, with any /files, ?query or #anchor),
+// o/r#57, #57 and 57. GitHub shares one number space between issues and PRs.
+export function parseIssueRef(arg, defaultRepo) {
+  const s = String(arg ?? "").trim();
+  const usage = "Use an issue URL (https://github.com/owner/repo/issues/57), owner/repo#57, #57 or 57.";
+  let m = ISSUE_URL_RE.exec(s) ?? SHORT_RE.exec(s);
+  if (m) return { repo: `${m[1]}/${m[2]}`, number: toNumber(m[3], s, usage, "issue") };
+  m = NUM_RE.exec(s);
+  if (m) {
+    if (!defaultRepo) {
+      throw new CollabError(EXIT.PRECONDITION, `"${s}" names no repo and none could be worked out from origin. ${usage}`);
+    }
+    return { repo: defaultRepo, number: toNumber(m[1], s, usage, "issue") };
+  }
+  throw new CollabError(EXIT.PRECONDITION, `not an issue reference: "${s}". ${usage}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -73,39 +93,104 @@ export function checkSupported(pr, repoInfo) {
 }
 
 // ---------------------------------------------------------------------------
-// Dashboard markers
+// Marked blocks: <!-- collab:<name>:start seq=N at=… --> … <!-- collab:<name>:end -->
+// The PR dashboard is the block named "dashboard"; a plan issue holds "plan-status" and "plan-doc".
 
 export const MARK_START = /<!-- collab:dashboard:start seq=(\d+)(?: at=([^ ]+))? -->/;
 export const MARK_END = "<!-- collab:dashboard:end -->";
 
-export function readMarker(body) {
-  const m = MARK_START.exec(String(body ?? ""));
+const BLOCK_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
+const markerCache = new Map([["dashboard", { start: MARK_START, end: MARK_END, prefix: "<!-- collab:dashboard:" }]]);
+
+// The start regex, end marker and the prefix a block may not hold, for one block name.
+function markersFor(name = "dashboard") {
+  const hit = markerCache.get(name);
+  if (hit) return hit;
+  if (typeof name !== "string" || !BLOCK_NAME_RE.test(name)) throw new Error(`not a collab block name: "${name}"`);
+  const m = {
+    start: new RegExp(`<!-- collab:${name}:start seq=(\\d+)(?: at=([^ ]+))? -->`),
+    end: `<!-- collab:${name}:end -->`,
+    prefix: `<!-- collab:${name}:`,
+  };
+  markerCache.set(name, m);
+  return m;
+}
+
+export function readMarker(body, { name = "dashboard" } = {}) {
+  const m = markersFor(name).start.exec(String(body ?? ""));
   return m ? { seq: Number(m[1]), at: m[2] ?? null } : null;
 }
 
-const startLine = (seq, at) => `<!-- collab:dashboard:start seq=${seq}${at ? ` at=${at}` : ""} -->`;
-const normalise = (s) => String(s).replace(/\r\n/g, "\n").replace(/^\n+|\n+$/g, "");
+const startLine = (name, seq, at) => `<!-- collab:${name}:start seq=${seq}${at ? ` at=${at}` : ""} -->`;
+
+// CRLF -> LF, then leading and trailing newlines dropped. A loop, not /\n+$/, which is quadratic
+// on a long run of newlines, and block text can come from a browser edit.
+function normalise(s) {
+  const t = String(s).replace(/\r\n/g, "\n");
+  let i = 0;
+  let j = t.length;
+  while (i < j && t[i] === "\n") i++;
+  while (j > i && t[j - 1] === "\n") j--;
+  return t.slice(i, j);
+}
+
+// Drops blank (empty or spaces/tabs only) lines at both ends of LF text.
+function trimBlankLines(t) {
+  const lines = t.split("\n");
+  const blank = (l) => /^[ \t]*$/.test(l);
+  let i = 0;
+  let j = lines.length;
+  while (i < j && blank(lines[i])) i++;
+  while (j > i && blank(lines[j - 1])) j--;
+  return lines.slice(i, j).join("\n");
+}
+
+function checkContent(name, content) {
+  if (content.includes(markersFor(name).prefix)) throw new Error(`${name} block must not contain collab markers`);
+}
+
+// Start marker, the content, end marker, joined with "\n".
+export function markedBlock(name, seq, at, content) {
+  const { end } = markersFor(name);
+  const text = String(content ?? "");
+  checkContent(name, text);
+  return `${startLine(name, seq, at)}\n${text}\n${end}`;
+}
+
+// The first complete block with this name: { seq, at, text } where text is what lies between
+// the markers with "\n" line endings and the blank lines at either end dropped. Null when the
+// start marker or the end marker after it is missing.
+export function readBlock(body, { name } = {}) {
+  const text = String(body ?? "");
+  const { start, end } = markersFor(name);
+  const m = start.exec(text);
+  const endAt = m ? text.indexOf(end, m.index + m[0].length) : -1;
+  if (!m || endAt < 0) return null;
+  const inner = trimBlankLines(text.slice(m.index + m[0].length, endAt).replace(/\r\n?/g, "\n"));
+  return { seq: Number(m[1]), at: m[2] ?? null, text: inner };
+}
 
 // Returns the new body, or null when nothing should be written: the body already holds a newer
 // render (existing seq > seq) or the same block. Only the text between the markers changes; the
-// owner's text around them stays byte-for-byte (CRLF included). With no complete marker pair,
-// the block plus a blank line goes at the very top.
-export function splice(body, block, seq, at) {
+// owner's text around them (and any other named block) stays byte-for-byte (CRLF included). With
+// no complete marker pair, the block plus a blank line goes at the very top.
+export function splice(body, block, seq, at, { name = "dashboard" } = {}) {
+  const { start, end } = markersFor(name);
   const text = String(body ?? "");
   const content = String(block ?? "");
-  if (content.includes("<!-- collab:dashboard:")) throw new Error("dashboard block must not contain collab markers");
+  checkContent(name, content);
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
   const inner = content.replace(/\r\n/g, "\n").replace(/\n/g, eol);
-  const fresh = `${startLine(seq, at)}${eol}${inner}${eol}${MARK_END}`;
+  const fresh = `${startLine(name, seq, at)}${eol}${inner}${eol}${end}`;
 
-  const m = MARK_START.exec(text);
-  const endAt = m ? text.indexOf(MARK_END, m.index + m[0].length) : -1;
+  const m = start.exec(text);
+  const endAt = m ? text.indexOf(end, m.index + m[0].length) : -1;
   if (!m || endAt < 0) return text.length ? `${fresh}${eol}${eol}${text}` : `${fresh}${eol}`;
 
   if (Number(m[1]) > Number(seq)) return null;
   const existing = text.slice(m.index + m[0].length, endAt);
   if (normalise(existing) === normalise(content)) return null;
-  return text.slice(0, m.index) + fresh + text.slice(endAt + MARK_END.length);
+  return text.slice(0, m.index) + fresh + text.slice(endAt + end.length);
 }
 
 // ---------------------------------------------------------------------------

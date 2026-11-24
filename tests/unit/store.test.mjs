@@ -2,11 +2,14 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { after, before, describe, test } from "node:test";
 import { CollabError, EXIT } from "../../skills/collab/lib/errors.mjs";
+import { git, hashText } from "../../skills/collab/lib/git.mjs";
 import {
+  KINDS,
   cacheRefFor,
   classifyPush,
   commitMessage,
   history,
+  list,
   read,
   refFor,
   remove,
@@ -313,5 +316,134 @@ describe("remove", () => {
     remove({ cwd: a, pr: 30 }); // already gone: no error
     const again = write({ cwd: b, pr: 30, agent: "bob", mutate: bump("bob") });
     assert.deepEqual(again.ledger, { seq: 1, counter: 1, log: ["bob"] });
+  });
+});
+
+describe("plan ledgers (kind)", () => {
+  const names = (rev) => sh(["ls-tree", "--name-only", rev], repo.remote).split(/\r?\n/).filter(Boolean);
+  const withFiles = (agent, files) => (cur) => ({ ...bump(agent)(cur), files });
+
+  test("kind plan uses refs/collab/plan-N and refs/collab-cache/<agent>/plan-N", () => {
+    assert.deepEqual(KINDS, ["pr", "plan"]);
+    assert.equal(refFor(57, "plan"), "refs/collab/plan-57");
+    assert.equal(cacheRefFor("alice", 57, "plan"), "refs/collab-cache/alice/plan-57");
+    assert.equal(cacheRefFor(null, 57, "plan"), "refs/collab-cache/anon/plan-57");
+    assert.equal(refFor(57), "refs/collab/pr-57", "pr stays the default");
+    assert.equal(cacheRefFor("alice", 57), "refs/collab-cache/alice/pr-57");
+
+    const res = write({ cwd: a, pr: 40, agent: "alice", kind: "plan", mutate: bump("alice") });
+    assert.equal(tryRev(repo.remote, "refs/collab/plan-40"), res.rev);
+    assert.equal(tryRev(repo.remote, "refs/collab/pr-40"), null);
+    assert.equal(tryRev(a, "refs/collab-cache/alice/plan-40"), res.rev);
+    assert.deepEqual(names(res.rev), ["ledger.json"], "without files the tree is ledger.json alone");
+
+    assert.equal(read({ cwd: b, pr: 40, agent: "bob" }), null, "the PR ledger with the same number is a different ref");
+    assert.deepEqual(read({ cwd: b, pr: 40, agent: "bob", kind: "plan" }), { ledger: res.ledger, rev: res.rev });
+    assert.deepEqual(history({ cwd: b, pr: 40, agent: "bob", kind: "plan" }).map((h) => h.event.type), ["test.inc"]);
+    assert.deepEqual(history({ cwd: b, pr: 40, agent: "bob" }), []);
+
+    // A PR ledger with the same number lives beside it, and removing one leaves the other.
+    write({ cwd: a, pr: 40, agent: "alice", mutate: bump("alice") });
+    remove({ cwd: a, pr: 40, kind: "plan" });
+    assert.equal(tryRev(repo.remote, "refs/collab/plan-40"), null);
+    assert.equal(tryRev(a, "refs/collab-cache/alice/plan-40"), null);
+    assert.notEqual(tryRev(repo.remote, "refs/collab/pr-40"), null);
+    assert.notEqual(tryRev(a, cacheRefFor("alice", 40)), null);
+  });
+
+  test("an unknown kind is a bug", () => {
+    const bug = (e) => e instanceof CollabError && e.code === EXIT.BUG && /unknown ledger kind/.test(e.message);
+    assert.throws(() => read({ cwd: a, pr: 1, agent: "alice", kind: "issue" }), bug);
+    assert.throws(() => write({ cwd: a, pr: 1, agent: "alice", kind: "PR", mutate: bump("alice") }), bug);
+    assert.throws(() => history({ cwd: a, pr: 1, agent: "alice", kind: "" }), bug);
+    assert.throws(() => remove({ cwd: a, pr: 1, kind: "plans" }), bug);
+    assert.throws(() => list({ cwd: a, agent: "alice", kind: "x" }), bug);
+  });
+
+  test("messages name the plan", () => {
+    const c = repo.clone("broken-plan");
+    sh(["remote", "set-url", "origin", `${repo.dir}/no-such-remote.git`], c);
+    assert.throws(() => read({ cwd: c, pr: 57, agent: "x", kind: "plan" }), (e) => e.code === EXIT.ENV && /for plan 57$/.test(e.message));
+    assert.throws(() => read({ cwd: c, pr: 57, agent: "x" }), (e) => e.code === EXIT.ENV && /for PR 57$/.test(e.message));
+  });
+
+  test("files sit next to ledger.json in the pushed tree; a later write without one drops it", () => {
+    const r1 = hashText(a, "# Plan\nfirst\n");
+    const r2 = hashText(a, "# Plan\r\nsecond\r\n");
+    const w1 = write({ cwd: a, pr: 41, agent: "alice", kind: "plan", mutate: withFiles("alice", { "r2.md": r2, "r1.md": r1 }) });
+    assert.deepEqual(names(w1.rev), ["ledger.json", "r1.md", "r2.md"]);
+    assert.match(sh(["ls-tree", w1.rev], repo.remote), /^100644 blob [0-9a-f]{40}\tledger\.json\n100644 blob [0-9a-f]{40}\tr1\.md\n100644 blob [0-9a-f]{40}\tr2\.md$/);
+    assert.equal(sh(["rev-parse", `${w1.rev}:r1.md`], repo.remote), r1);
+    assert.equal(sh(["cat-file", "blob", `${w1.rev}:r2.md`], repo.remote), "# Plan\nsecond");
+
+    // Bob's clone gets the blobs with the ledger, so it can read a revision without another fetch.
+    read({ cwd: b, pr: 41, agent: "bob", kind: "plan" });
+    assert.equal(sh(["cat-file", "blob", `${cacheRefFor("bob", 41, "plan")}:r1.md`], b), "# Plan\nfirst");
+
+    // Nothing carries over from the parent: the caller passes the full map each write.
+    const w2 = write({ cwd: b, pr: 41, agent: "bob", kind: "plan", mutate: withFiles("bob", { "r2.md": r2 }) });
+    assert.deepEqual(names(w2.rev), ["ledger.json", "r2.md"]);
+    assert.equal(sh(["rev-parse", `${w2.rev}^`], repo.remote), w1.rev);
+    const w3 = write({ cwd: a, pr: 41, agent: "alice", kind: "plan", mutate: bump("alice") });
+    assert.deepEqual(names(w3.rev), ["ledger.json"]);
+    assert.deepEqual(w3.ledger.log, ["alice", "bob", "alice"]);
+  });
+
+  test("bad file names or blob ids are refused as bugs, before anything is pushed", () => {
+    const first = write({ cwd: a, pr: 42, agent: "alice", kind: "plan", mutate: bump("alice") });
+    const oid = hashText(a, "text");
+    const bug = (e) => e instanceof CollabError && e.code === EXIT.BUG;
+    for (const name of ["ledger.json", "../x", "a/b", "a\\b", ".hidden", "-x", "", "a b", "r1.md\n100644 blob x\tevil"]) {
+      assert.throws(() => write({ cwd: a, pr: 42, agent: "alice", kind: "plan", mutate: withFiles("alice", { [name]: oid }) }), bug, JSON.stringify(name));
+    }
+    for (const bad of ["nope", oid.toUpperCase(), null, 7, `${oid}\n`]) {
+      assert.throws(() => write({ cwd: a, pr: 42, agent: "alice", kind: "plan", mutate: withFiles("alice", { "r1.md": bad }) }), bug, String(bad));
+    }
+    assert.throws(() => write({ cwd: a, pr: 42, agent: "alice", kind: "plan", mutate: withFiles("alice", ["r1.md"]) }), bug);
+    // A well-formed id of a blob this clone doesn't have fails in mktree, also before the push.
+    assert.throws(() => write({ cwd: a, pr: 42, agent: "alice", kind: "plan", mutate: withFiles("alice", { "r1.md": "0".repeat(40) }) }), (e) => e.code === EXIT.ENV);
+    assert.equal(tryRev(repo.remote, refFor(42, "plan")), first.rev);
+  });
+});
+
+describe("list", () => {
+  test("returns the plan ledgers in numeric order, skips unreadable ones and prunes a deleted one", () => {
+    const own = makeRepo();
+    try {
+      const x = own.clone("x");
+      const y = own.clone("y");
+      for (const n of [100, 9, 10]) write({ cwd: x, pr: n, agent: "xavier", kind: "plan", mutate: () => ({ ledger: { n }, events: [ev("xavier", "test.create")] }) });
+      write({ cwd: x, pr: 5, agent: "xavier", mutate: () => ({ ledger: { pr: 5 }, events: [] }) });
+      // A plan ref whose ledger.json isn't JSON (and one whose name isn't a number) are skipped.
+      const junk = hashText(x, "not json");
+      const tree = git(["mktree"], { cwd: x, input: `100644 blob ${junk}\tledger.json\n` }).stdout.trim();
+      const commit = git(["commit-tree", tree, "-m", "junk"], { cwd: x }).stdout.trim();
+      sh(["push", "-q", "origin", `${commit}:refs/collab/plan-7`, `${commit}:refs/collab/plan-draft`], x);
+
+      const got = list({ cwd: y, agent: "yolanda", kind: "plan" });
+      assert.deepEqual(got.map((e) => [e.n, e.ledger]), [[9, { n: 9 }], [10, { n: 10 }], [100, { n: 100 }]]);
+      assert.equal(got[1].rev, tryRev(own.remote, "refs/collab/plan-10"));
+      assert.equal(tryRev(y, cacheRefFor("yolanda", 10, "plan")), got[1].rev, "list fills the cache refs read() uses");
+      assert.deepEqual(history({ cwd: y, pr: 10, agent: "yolanda", kind: "plan" }).map((h) => h.event.type), ["test.create"]);
+      assert.deepEqual(list({ cwd: y, agent: "yolanda" }).map((e) => [e.n, e.ledger]), [[5, { pr: 5 }]], "kind pr lists PR ledgers only");
+
+      remove({ cwd: x, pr: 10, kind: "plan" });
+      assert.deepEqual(list({ cwd: y, agent: "yolanda", kind: "plan" }).map((e) => e.n), [9, 100]);
+      assert.equal(tryRev(y, cacheRefFor("yolanda", 10, "plan")), null, "fetch --prune dropped the deleted ledger's cache ref");
+      assert.deepEqual(list({ cwd: y, agent: "zed", kind: "plan" }).map((e) => e.n), [9, 100], "another agent's cache starts empty");
+      assert.throws(() => list({ cwd: y, agent: "bad id", kind: "plan" }), (e) => e.code === EXIT.PRECONDITION);
+    } finally {
+      own.cleanup();
+    }
+  });
+
+  test("is empty when origin has no ledgers of that kind", () => {
+    const own = makeRepo();
+    try {
+      const x = own.clone("x");
+      assert.deepEqual(list({ cwd: x, agent: "xavier", kind: "plan" }), []);
+    } finally {
+      own.cleanup();
+    }
   });
 });

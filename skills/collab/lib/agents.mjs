@@ -8,6 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CollabError, EXIT } from "./errors.mjs";
 import { childEnv as cleanPath } from "./config.mjs";
+import { gitVersion } from "./git.mjs";
 import { aliveFile, newKey } from "./relay.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -225,6 +226,10 @@ export function doctorChecks({ env = process.env, home = homedir(), cwd = proces
   add("Node 22 or newer", major >= 22, `node ${process.versions.node}`);
   const git = probe("git", ["--version"]);
   add("git", git.ok, git.ok ? git.out : "git not found on PATH");
+  // Plan sessions merge with `git merge-file --object-id`, which git 2.43 added. PR collabs don't need it.
+  const ver = gitVersion();
+  const ver243 = !!ver && (ver[0] > 2 || (ver[0] === 2 && ver[1] >= 43));
+  add("git 2.43+ (plan sessions)", ver243, ver ? (ver243 ? `git ${ver.join(".")}` : `git ${ver.join(".")}: collab plan needs 2.43 or newer`) : "git version unknown", false);
   let gh;
   try { gh = env.COLLAB_GH ? { ok: true, out: "COLLAB_GH override" } : probe("gh", ["--version"]); } catch { gh = { ok: false }; }
   add("GitHub CLI (gh)", gh.ok, gh.ok ? gh.out.split("\n")[0] : "gh not found; install it and run gh auth login");

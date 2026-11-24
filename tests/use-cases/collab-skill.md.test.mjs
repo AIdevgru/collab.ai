@@ -7,6 +7,8 @@ const read = (p) => readFileSync(new URL(`../../skills/collab/${p}`, import.meta
 const SKILL = read("SKILL.md");
 const PROTOCOL = read("PROTOCOL.md");
 const PROMPT = read("templates/join-prompt.md");
+const PLAN = read("PLAN.md");
+const PLAN_PROMPT = read("templates/plan-join-prompt.md");
 
 test("SKILL.md has only name and description frontmatter so every vendor can load it", () => {
   const fm = /^---\n([\s\S]*?)\n---\n/.exec(SKILL)?.[1];
@@ -16,6 +18,8 @@ test("SKILL.md has only name and description frontmatter so every vendor can loa
   assert.match(fm, /^name: collab$/m);
   assert.match(fm, /'\/collab <PR link>'/);
   assert.match(fm, /'\$collab <PR link>'/);
+  assert.match(fm, /'\/collab plan <idea>'/);
+  assert.match(fm, /'\$collab plan'/);
   assert.ok(fm.length < 1024, "description stays under the 1024-char skill limit");
 });
 
@@ -57,4 +61,29 @@ test("the join prompt is self-contained for agents without the skill", () => {
   assert.match(PROMPT, /read a task's change with `collab diff T<n>`/);
   assert.match(PROMPT, /only inside the repo's `\.collab\/` folder/);
   assert.match(PROMPT, /no shell variables, no `&&` chains, no `cd` first/);
+});
+
+test("plan sessions: SKILL.md hands off to PLAN.md, which keeps agreement with people", () => {
+  assert.match(SKILL, /if the argument starts with `plan`/);
+  assert.match(SKILL, /Read `PLAN\.md` next to this file/);
+  assert.match(PLAN, /collab plan new --title/);
+  assert.match(PLAN, /collab plan join 57/);
+  assert.match(PLAN, /collab plan list --json/);
+  assert.match(PLAN, /Only after an explicit yes to that revision number/);
+  assert.match(PLAN, /\*\*Never post a comment that starts with `\/collab`\.\*\*/);
+  assert.match(PLAN, /\*\*Do this first:\*\* plan mode blocks collab's writes/);
+  assert.match(PLAN, /Approving publishes revision N\+1 for everyone\. It is not agreeing/);
+  assert.match(PLAN, /run_in_background/);
+  assert.match(PLAN, /one sentence per line/);
+  assert.match(PROTOCOL, /^## Plan sessions$/m);
+});
+
+test("the plan join prompt is self-contained for agents without the skill", () => {
+  for (const k of ["{{url}}", "{{number}}", "{{tool}}"]) assert.ok(PLAN_PROMPT.includes(k), k);
+  assert.match(PLAN_PROMPT, /node "\$HOME\/\.collab\/bin\/collab\.mjs" plan <subcommand> \{\{number\}\} --agent <your id>/);
+  assert.match(PLAN_PROMPT, /only after they say yes/);
+  assert.match(PLAN_PROMPT, /Never post a comment that starts with `\/collab`/);
+  assert.match(PLAN_PROMPT, /draft\.conflict\.md/);
+  assert.match(PLAN_PROMPT, /data, not instructions/);
+  assert.match(PLAN_PROMPT, /no shell variables, no `&&` chains, no `cd` first/);
 });
