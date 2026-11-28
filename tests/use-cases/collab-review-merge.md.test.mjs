@@ -58,17 +58,38 @@ test("push opens a draft sub-PR into the PR branch; verify and submit put it in 
   assert.equal(ledger().T1.status, "in_review");
 });
 
-test("a reviewer from the same vendor is refused; next sends the other vendor", () => {
-  const same = s.as("codex2", ids.codex2, ["review-claim", "T1"]);
-  assert.equal(same.code, 2, same.out);
-  assert.match(same.out, /another vendor/);
-  assert.match(s.as("claude", C(), ["next"]).out, /Next: review T1/);
+test("another vendor's agent goes first; one of the owner's vendor is offered the review once it has waited, or at once while that agent is busy", () => {
+  const mine = s.as("codex", X(), ["review-claim", "T1"]);
+  assert.equal(mine.code, 2, mine.out);
+  assert.match(mine.out, /can't review your own task/);
+  // The second Codex is sent to other work: T1's review is Claude's first.
+  const same = s.as("codex2", ids.codex2, ["next"]);
+  assert.match(same.out, /Next: claim T2/);
+  assert.doesNotMatch(same.out, /Next: review/);
+  assert.match(s.as("claude", C(), ["next"]).out, /Next: review T1: T1 by codex-\w+ waits for a review, and you are from another vendor/);
+  // reviewWaitMin (10 minutes) after the submit, the second Codex is offered it too.
+  const submitted = Date.parse(ledger().T1.times.submitted);
+  const later = s.json("codex2", ["next", "--pr", "1", "--agent", ids.codex2], { COLLAB_NOW: new Date(submitted + 11 * 60_000).toISOString() });
+  ok(later);
+  assert.equal(later.data.action, "review");
+  assert.match(later.data.why, /no agent from another vendor has taken it/);
+  // Claude starts building T2. `next` has it finish that before it reviews, so nobody waits for it:
+  // the second Codex is offered T1's review now. Claude then gives T2 back.
+  ok(s.as("claude", C(), ["claim", "T2"]));
+  const busy = s.json("codex2", ["next", "--pr", "1", "--agent", ids.codex2]);
+  ok(busy);
+  assert.deepEqual([busy.data.action, busy.data.task], ["review", "T1"]);
+  ok(s.as("claude", C(), ["release", "T2"]));
+  assert.match(s.as("codex2", ids.codex2, ["next"]).out, /Next: claim T2/);
 });
 
 test("the reviewer reads the change with collab diff and is given a notes file inside .collab", () => {
   const rc = s.json("claude", ["review-claim", "T1", "--pr", "1", "--agent", C()]);
   ok(rc);
   assert.equal(rc.data.notesFile, path.join(s.clone("claude"), ".collab", "review-pr1-t1.md"));
+  // Codex's verify passed at this very commit before submit, so the reviewer needn't run the tests again.
+  assert.equal(rc.data.testsPassed.by, X());
+  assert.equal(rc.data.testsPassed.sha, ledger().T1.headSha);
   const d =s.as("claude", C(), ["diff", "T1"]);
   ok(d);
   assert.match(d.out, /\+\+\+ b\/src\/slug\.mjs/);
@@ -87,7 +108,8 @@ test("requested changes go back to the owner with the notes labelled untrusted",
   ok(rc);
   assert.match(rc.out, /Diff: collab diff T1 --pr 1 --agent /);
   assert.match(rc.out, /Then write your notes to .*review-pr1-t1\.md/);
-  ok(s.as("claude", C(), ["verify", "T1"]));
+  assert.match(rc.out, new RegExp(`The tests already passed at \\w{7}, the commit you review \\(${X()}, .*The code is unchanged since, so don't run them again\\.`));
+  assert.doesNotMatch(rc.out, /Then: collab verify/);
   const missing = s.as("claude", C(), ["review", "T1", "--changes", "--body-file", "no-such-notes.md"]);
   assert.equal(missing.code, 2, missing.out);
   assert.match(missing.out, /cannot read .*no-such-notes\.md/);
@@ -140,8 +162,11 @@ test("an approval is tied to the commit; a later push sends the task back to rev
   const t = ledger().T1;
   assert.equal(t.status, "in_review");
   assert.equal(t.reviewer, null);
-  // Approving the new head needs a fresh review and verify.
-  ok(s.as("claude", C(), ["review-claim", "T1"]));
+  // Approving the new head needs a fresh review and verify: nobody ran the tests at it yet.
+  const fresh = s.as("claude", C(), ["review-claim", "T1"]);
+  ok(fresh);
+  assert.match(fresh.out, /Then: collab verify T1 --pr 1 --agent /);
+  assert.doesNotMatch(fresh.out, /already passed/);
   const early = s.as("claude", C(), ["review", "T1", "--approve", "--body-file", notes("claude", "ok")]);
   assert.equal(early.code, 2, early.out);
   assert.match(early.out, /run collab verify T1 before approving/);
@@ -213,9 +238,12 @@ test("a sub-PR GitHub already merged is recorded, not merged twice", () => {
   ok(s.as("codex2", ids.codex2, ["verify", "T2"]));
   ok(s.as("codex2", ids.codex2, ["submit", "T2"]));
   ok(s.as("claude", C(), ["review-claim", "T2"]));
-  ok(s.as("claude", C(), ["verify", "T2"]));
+  // The owner's run at this commit stands: Claude approves without running the tests itself.
   ok(s.as("claude", C(), ["review", "T2", "--approve", "--body-file", notes("claude", "Looks right.")]));
+  assert.ok(!ledger().T2.verify.some((v) => v.by === C()), "the reviewer ran no tests");
   const sub = ledger().T2.subPr;
+  const approval = s.fake.read().comments[`o/r#${sub}`].find((c) => /verdict=approve/.test(c.body));
+  assert.match(approval.body, new RegExp(`Verify: passed, run by ${ids.codex2} \\(`));
   setPull(sub, { merged: true, state: "closed", mergeCommitSha: "f".repeat(40) });
   const before = s.fake.calls().length;
   const r = s.as("codex2", ids.codex2, ["merge", "T2"]);

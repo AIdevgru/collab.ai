@@ -2,11 +2,12 @@
 // Env markers come from docs/spikes.md row 6.
 
 import { randomInt } from "node:crypto";
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { CollabError, EXIT } from "./errors.mjs";
 import { ghRaw } from "./github.mjs";
+import { writeAtomic } from "./relay.mjs";
 
 const TOOLS = ["claude", "codex", "gemini", "grok"];
 const LOGIN_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
@@ -74,17 +75,35 @@ export function collabHome(env = process.env) {
 export function saveAgentFile(id, data) {
   try {
     if (typeof id !== "string" || !ID_RE.test(id)) return false;
-    const dir = join(collabHome(), "agents");
-    mkdirSync(dir, { recursive: true });
-    const file = join(dir, `${id}.json`);
-    const tmp = `${file}.${process.pid}.tmp`;
-    writeFileSync(tmp, `${JSON.stringify(data ?? {}, null, 2)}\n`);
-    renameSync(tmp, file);
+    // The inbox cursor is saved here after most commands: writeAtomic retries a rename that
+    // Windows refuses while another process has the file open, and leaves no temp file behind.
+    writeAtomic(join(collabHome(), "agents", `${id}.json`), `${JSON.stringify(data ?? {}, null, 2)}\n`);
     return true;
   } catch {
     return false;
   }
 }
+
+// What saveAgentFile wrote for this id: {} when there is no file, null when there is one that
+// can't be read right now (a caller that rewrites the file must not replace it with less).
+export function loadAgentFile(id) {
+  if (typeof id !== "string" || !ID_RE.test(id)) return {};
+  let text;
+  try {
+    text = readFileSync(join(collabHome(), "agents", `${id}.json`), "utf8");
+  } catch (e) {
+    return e?.code === "ENOENT" ? {} : null;
+  }
+  try {
+    const data = JSON.parse(text);
+    return data && typeof data === "object" && !Array.isArray(data) ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+// The same, with {} for a file that can't be read. For reading only.
+export const readAgentFile = (id) => loadAgentFile(id) ?? {};
 
 export function requireOwner(env = process.env) {
   if (isAgentEnv(env)) {

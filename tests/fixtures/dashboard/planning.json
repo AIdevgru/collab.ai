@@ -23,9 +23,11 @@
       "reviewLeaseMin": 60,
       "planLeaseMin": 15,
       "reviewAlertH": 2,
+      "reviewWaitMin": 10,
       "maxTasks": 12,
       "wip": 1,
       "worktreeRoot": ".collab/wt",
+      "verify": "local",
       "verifyCmd": null,
       "setupCmd": null
     },

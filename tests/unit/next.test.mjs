@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { addMinutes } from "../../skills/collab/lib/clock.mjs";
 import { apply, newLedger } from "../../skills/collab/lib/ledger.mjs";
-import { nextAction } from "../../skills/collab/lib/next.mjs";
+import { claimableTasks, criticalRanks, nextAction } from "../../skills/collab/lib/next.mjs";
 
 // ---------------------------------------------------------------- fixtures (time is pinned)
 
@@ -110,6 +110,38 @@ describe("next: claim", () => {
     const L = run(planned([spec("a", { scope: ["src/**"] }), spec("b", { scope: ["src/a.js"] })]), ...submitted(CLAUDE, "T1", "s1"));
     assert.equal(nextAction(L, CLAUDE, green(), at(10)).task, "T2");
   });
+  test("the task with the longest chain of work waiting on it goes first, then the bigger one, then id order", () => {
+    // T2 holds up T3 and, through it, T4 (L): 1 + 1 + 3 = 5. T1 holds up nothing: 1.
+    const chain = planned([spec("one"), spec("two"), spec("three", { deps: ["T2"] }), spec("four", { deps: ["T3"], size: "L" })]);
+    assert.equal(nextAction(chain, CLAUDE, green(), at(5)).task, "T2");
+    assert.deepEqual(claimableTasks(chain, CLAUDE, at(5)).claimable, ["T2", "T1"]);
+    assert.deepEqual(Object.fromEntries(criticalRanks(chain)), { T1: 1, T2: 5, T3: 4, T4: 3 });
+    // Alone, an L task outranks an S task with one S task waiting on it (3 against 2).
+    const sizes = planned([spec("small"), spec("big", { size: "L" }), spec("after", { deps: ["T1"] })]);
+    assert.equal(nextAction(sizes, CLAUDE, green(), at(5)).task, "T2");
+    // Equal ranks keep id order.
+    assert.deepEqual(claimableTasks(planned([spec("a"), spec("b"), spec("c")]), CLAUDE, at(5)).claimable, ["T1", "T2", "T3"]);
+    // Done tasks hold up nothing, and a task that waits on a cancelled one waits on that one's dependencies.
+    const cancelled = run(planned([spec("one"), spec("two", { deps: ["T1"] }), spec("three", { deps: ["T2"], size: "L" }), spec("four", { size: "M" })]),
+      ev("task.cancel", "owner", "T2", { reason: "not needed" }));
+    assert.deepEqual(Object.fromEntries(criticalRanks(cancelled)), { T1: 4, T3: 3, T4: 2 });
+    assert.equal(nextAction(cancelled, CLAUDE, green(), at(5)).task, "T1");
+    // A fix-ci task and a task reserved for me still come first.
+    const fix = apply(chain, ev("task.add", CODEX, null, { kind: "fix-ci", forSha: "deadbeef" }));
+    assert.equal(nextAction(fix, CLAUDE, { mainCi: "FAILURE", subs: {} }, at(5)).task, "T5");
+    const reserved = apply(chain, ev("task.reserve", "owner", "T1", { for: CLAUDE, until: at(120) }, 2));
+    assert.equal(nextAction(reserved, CLAUDE, green(), at(5)).task, "T1");
+    assert.equal(nextAction(reserved, CLAUDE2, green(), at(5)).task, "T2");
+  });
+  test("criticalRanks never loops on a dependency cycle", () => {
+    const L = planned([spec("a"), spec("b")]);
+    const cyclic = structuredClone(L);
+    cyclic.tasks.T1.deps = ["T2"];
+    cyclic.tasks.T2.deps = ["T1"];
+    const ranks = criticalRanks(cyclic);
+    assert.deepEqual([...ranks.keys()].sort(), ["T1", "T2"]);
+    for (const r of ranks.values()) assert.ok(Number.isFinite(r));
+  });
 });
 
 describe("next: work", () => {
@@ -135,9 +167,38 @@ describe("next: review", () => {
   const L = run(planned(), ...submitted(CLAUDE, "T1", "s1"));
   test("another vendor claims the review", () => {
     assert.deepEqual(pick(nextAction(L, CODEX, green(), at(10))), { action: "review", task: "T1", cmd: ["collab", "review-claim", "T1", "--agent", CODEX] });
+    assert.match(nextAction(L, CODEX, green(), at(10)).why, /you are from another vendor/);
   });
-  test("the same vendor is never sent to review", () => {
+  test("the owner's vendor gets the review once it has waited reviewWaitMin, while another vendor is around", () => {
+    // T1 was submitted at minute 4 and CODEX is around: CLAUDE2 claims other work until minute 14.
     assert.equal(nextAction(L, CLAUDE2, green(), at(10)).action, "claim");
+    const r = nextAction(L, CLAUDE2, green(), at(14));
+    assert.deepEqual(pick(r), { action: "review", task: "T1", cmd: ["collab", "review-claim", "T1", "--agent", CLAUDE2] });
+    assert.match(r.why, /no agent from another vendor has taken it/);
+    // The owner never is.
+    assert.notEqual(nextAction(L, CLAUDE, green(), at(30)).action, "review");
+  });
+  test("with no agent from another vendor around, the owner's vendor reviews at once", () => {
+    const same = run(fresh(), ev("agent.join", CLAUDE2, null, { tool: "claude" }), ev("plan", CLAUDE, null, { tasks: [spec("one"), spec("two")] }), ...submitted(CLAUDE, "T1", "s1"));
+    const r = nextAction(same, CLAUDE2, green(), at(5));
+    assert.deepEqual(pick(r), { action: "review", task: "T1", cmd: ["collab", "review-claim", "T1", "--agent", CLAUDE2] });
+    assert.doesNotMatch(r.why, /another vendor/);
+    // A Codex that joined but hasn't been seen for 30 minutes isn't around.
+    const gone = run(planned(), claim(CLAUDE, "T1", 40), push(CLAUDE, "T1", "s1", 41), verify(CLAUDE, "T1", "s1", 42), submit(CLAUDE, "T1", "s1", 45));
+    assert.equal(nextAction(gone, CLAUDE2, green(), at(46)).action, "review");
+  });
+  test("of two reviews, the one from another vendor comes first", () => {
+    // CLAUDE2 may review T1 (CLAUDE's, open after the wait) and T2 (CODEX's).
+    const two = run(L, ...submitted(CODEX, "T2", "s2", 5));
+    const r = nextAction(two, CLAUDE2, green(), at(30));
+    assert.equal(r.task, "T2");
+    assert.match(r.why, /you are from another vendor/);
+  });
+  test("waiting for a review held for another vendor says until when", () => {
+    const one = run(planned([spec("a")]), ...submitted(CLAUDE, "T1", "s1"));
+    const r = nextAction(one, CLAUDE2, green(), at(10));
+    assert.equal(r.action, "wait");
+    assert.ok(r.why.includes(`T1's review goes to an agent from another vendor first, until ${at(14)}`), r.why);
   });
   test("a review I hold comes back as the review command", () => {
     const R = apply(L, rclaim(CODEX, "T1", 10));
@@ -217,11 +278,18 @@ describe("next: merge", () => {
     // A push during review moves the head past the last verify; the approval binds the new head.
     const L = run(planned(), ...submitted(CLAUDE, "T1", "s1"), rclaim(CODEX, "T1", 5), push(CLAUDE, "T1", "s2", 6), rclaim(CODEX, "T1", 6), verdict(CODEX, "T1", "approve", "s2", 7));
     assert.equal(L.tasks.T1.status, "approved");
-    for (const live of [null, { ok: false }, green(), green({ T1: { ci: "UNKNOWN", headSha: "s2" } })]) {
+    for (const live of [null, { ok: false }, green(), green({ T1: { ci: "UNKNOWN", headSha: "s2" } }), green({ T1: { ci: "SUCCESS", headSha: "s2" } })]) {
       const r = nextAction(L, CLAUDE, live, at(10));
       assert.notEqual(r.action, "merge", JSON.stringify(live));
     }
-    assert.equal(nextAction(L, CLAUDE, green({ T1: { ci: "SUCCESS", headSha: "s2" } }), at(10)).action, "merge");
+    // The sub-PR's green checks don't stand in for the tests (they may be a linter): its owner
+    // runs them at the approved head, and then it merges.
+    const r = nextAction(L, CLAUDE, green({ T1: { ci: "SUCCESS", headSha: "s2" } }), at(10));
+    assert.deepEqual(pick(r), { action: "work", task: "T1", cmd: ["collab", "verify", "T1", "--agent", CLAUDE] });
+    assert.match(r.why, /T1 is approved at s2, and its tests have not passed on that commit: run them/);
+    const ok = apply(L, verify(CLAUDE, "T1", "s2", 11));
+    assert.equal(nextAction(ok, CLAUDE, green({ T1: { ci: "SUCCESS", headSha: "s2" } }), at(12)).action, "merge");
+    assert.equal(nextAction(ok, CLAUDE, null, at(12)).action, "merge");
   });
   test("a push during my review sends me back to review-claim for the new commit", () => {
     const L = run(planned(), ...submitted(CLAUDE, "T1", "s1"), rclaim(CODEX, "T1", 5), push(CLAUDE, "T1", "s2", 6));
@@ -304,7 +372,7 @@ describe("next: done and wait", () => {
     assert.deepEqual(pick(r), { action: "wait", task: undefined, cmd: ["collab", "wait", "--timeout", "9m", "--agent", CLAUDE] });
     assert.match(r.why, /T1 waits for a review/);
     const solo = run(newLedger({ pr: PR, agent: { id: CLAUDE, tool: "claude" }, now: T0 }), ev("plan", CLAUDE, null, { tasks: [spec("a")] }), ...submitted(CLAUDE, "T1", "s1"));
-    assert.match(nextAction(solo, CLAUDE, null, at(10)).why, /needs a reviewer from another vendor to join/);
+    assert.match(nextAction(solo, CLAUDE, null, at(10)).why, /T1 needs a reviewer: another agent has to join/);
     const frozen = run(L, ...approvedBy(CODEX, "T1", "s1", 5));
     assert.match(nextAction(frozen, CLAUDE, { mainCi: "FAILURE", subs: {} }, at(10)).why, /merges are frozen/);
   });
@@ -391,5 +459,94 @@ describe("next: tasks the owner reserved for an invited agent", () => {
     assert.equal(L.tasks.T1.status, "done");
     assert.equal(nextAction(L, CLAUDE, green(), at(9)).action, "wait");
     assert.equal(nextAction(L, CODEX, green(), at(9)).task, "T2");
+  });
+});
+
+describe("next: CI runs the tests (\"verify\": \"ci\")", () => {
+  const ciLedger = (tasks = [spec("one")]) => run(
+    newLedger({ pr: PR, config: { verify: "ci", ciWorkflows: ["ci.yml"] }, agent: { id: CLAUDE, tool: "claude", host: "pc", pid: null }, now: T0 }),
+    ev("agent.join", CODEX, null, { tool: "codex" }), ev("plan", CLAUDE, null, { tasks }),
+  );
+  const started = (agent, sha, min) => ev("task.ci", agent, "T1", { sha, state: "started", runs: [{ workflow: "ci.yml" }] }, min);
+  const result = (state, sha, min) => ev("task.ci", CODEX, "T1", { sha, state, runs: [{ workflow: "ci.yml", id: 9, url: "https://x/9", status: "completed", conclusion: state === "passed" ? "success" : "failure" }], summary: `ci.yml ${state === "passed" ? "passed" : "failure (https://x/9)"}` }, min);
+  const pushed = () => run(ciLedger(), claim(CLAUDE, "T1", 1), push(CLAUDE, "T1", "sha1", 2));
+  const inReview = () => run(pushed(), started(CLAUDE, "sha1", 3), submit(CLAUDE, "T1", "sha1", 4));
+
+  test("a pushed task verifies first, and submits as soon as CI runs", () => {
+    assert.deepEqual(nextAction(pushed(), CLAUDE, green(), at(3)).cmd, ["collab", "verify", "T1", "--agent", CLAUDE]);
+    const r = nextAction(run(pushed(), started(CLAUDE, "sha1", 3)), CLAUDE, green(), at(4));
+    assert.equal(r.action, "work");
+    assert.deepEqual(r.cmd, ["collab", "submit", "T1", "--agent", CLAUDE]);
+  });
+  test("CI that failed sends the task back to its owner, and tells the reviewer to request changes", () => {
+    const L = run(inReview(), rclaim(CODEX, "T1", 5), result("failed", "sha1", 6));
+    const mine = nextAction(L, CLAUDE, green(), at(7));
+    assert.deepEqual(pick(mine), { action: "fix", task: "T1", cmd: ["collab", "push", "T1", "--agent", CLAUDE] });
+    assert.match(mine.why, /CI failed on T1 at sha1: "ci\.yml failure \(https:\/\/x\/9\)"\. Fix it.*collab verify T1 runs it again/, "CI's summary is quoted: another agent wrote it");
+    const theirs = nextAction(L, CODEX, green(), at(7));
+    assert.deepEqual(theirs.cmd, ["collab", "review", "T1", "--changes", "--body-file", "review.md", "--agent", CODEX]);
+    assert.match(theirs.why, /CI failed on T1 at sha1/);
+  });
+  test("a new commit pushed during the review gets CI started on it", () => {
+    const L = run(inReview(), result("failed", "sha1", 5), push(CLAUDE, "T1", "sha2", 6));
+    const r = nextAction(L, CLAUDE, green(), at(7));
+    assert.deepEqual(pick(r), { action: "work", task: "T1", cmd: ["collab", "verify", "T1", "--agent", CLAUDE] });
+    assert.match(r.why, /T1 is in review at sha2, and no CI has run on that commit/);
+    const going = nextAction(apply(L, started(CLAUDE, "sha2", 7)), CLAUDE, green(), at(8));
+    assert.equal(going.action, "wait");
+    assert.match(going.why, /T1 waits for a review \(its CI is running at sha2\)/);
+  });
+  test("an approved task merges only once CI passed at its head, whatever the sub-PR's checks say", () => {
+    const L = run(inReview(), ...approvedBy(CODEX, "T1", "sha1", 5));
+    for (const sub of [{ ci: "NONE", mergeable: "MERGEABLE" }, { ci: "SUCCESS", mergeable: "MERGEABLE" }]) {
+      const r = nextAction(L, CLAUDE, green({ T1: { ...sub, headSha: "sha1" } }), at(7));
+      assert.equal(r.action, "wait", `${sub.ci}: ${r.why}`);
+      assert.match(r.why, /T1 is approved and waits for green CI \(its CI is running at sha1\)/);
+    }
+    const passed = apply(L, result("passed", "sha1", 8));
+    assert.equal(nextAction(passed, CLAUDE, green({ T1: { ci: "NONE", mergeable: "MERGEABLE", headSha: "sha1" } }), at(9)).action, "merge");
+  });
+
+  test("the CI collab started speaks before the sub-PR's own red checks, and a rerun makes them moot", () => {
+    const L = run(inReview(), rclaim(CODEX, "T1", 5), result("failed", "sha1", 6));
+    const red = green({ T1: { ci: "FAILURE", mergeable: "MERGEABLE", headSha: "sha1" } });
+    assert.match(nextAction(L, CLAUDE, red, at(7)).why, /CI failed on T1 at sha1: "ci\.yml failure.*collab verify T1 runs it again/);
+    const again = apply(L, started(CLAUDE, "sha1", 7));
+    assert.notEqual(nextAction(again, CLAUDE, red, at(8)).action, "fix", "the old failure on the sub-PR is from the run before");
+  });
+  test("an approved task with no CI at its head gets it started by its owner", () => {
+    // The owner pushed during the review and then waived it: nothing ran on that commit.
+    const L = run(pushed(), started(CLAUDE, "sha1", 3), submit(CLAUDE, "T1", "sha1", 4), push(CLAUDE, "T1", "sha2", 5), ev("review.waive", "owner", "T1", {}, 6));
+    assert.equal(L.tasks.T1.status, "approved");
+    const r = nextAction(L, CLAUDE, green(), at(7));
+    assert.deepEqual(pick(r), { action: "work", task: "T1", cmd: ["collab", "verify", "T1", "--agent", CLAUDE] });
+    assert.match(r.why, /T1 is approved at sha2, and no CI has run on that commit/);
+  });
+  test("a stale approved task whose CI failed, or never ran at its head, is taken over", () => {
+    const failed = run(inReview(), ...approvedBy(CODEX, "T1", "sha1", 5), result("failed", "sha1", 7));
+    const late = at(60 * 24);
+    const r = nextAction(failed, CODEX, green({ T1: { ci: "NONE", mergeable: "MERGEABLE", headSha: "sha1" } }), late);
+    assert.deepEqual(pick(r), { action: "reclaim", task: "T1", cmd: ["collab", "claim", "T1", "--steal", "--agent", CODEX] });
+    const never = run(pushed(), started(CLAUDE, "sha1", 3), submit(CLAUDE, "T1", "sha1", 4), push(CLAUDE, "T1", "sha2", 5), ev("review.waive", "owner", "T1", {}, 6));
+    assert.equal(nextAction(never, CODEX, green(), late).action, "reclaim");
+    // Still running: it may yet pass, and anyone may merge it then.
+    const running = run(inReview(), ...approvedBy(CODEX, "T1", "sha1", 5));
+    assert.equal(nextAction(running, CODEX, green(), late).action, "wait");
+  });
+  test("moved back to the machines, a task approved while its CI ran gets its tests run there before it merges", () => {
+    const L = run(inReview(), ...approvedBy(CODEX, "T1", "sha1", 5), ev("config.verify", "owner", null, { verify: "local" }, 7));
+    const sub = green({ T1: { ci: "SUCCESS", mergeable: "MERGEABLE", headSha: "sha1" } });
+    const r = nextAction(L, CLAUDE, sub, at(8));
+    assert.deepEqual(pick(r), { action: "work", task: "T1", cmd: ["collab", "verify", "T1", "--agent", CLAUDE] });
+    assert.notEqual(nextAction(L, CODEX, sub, at(8)).action, "merge", "a green linter on the sub-PR isn't the tests");
+    assert.equal(nextAction(L, CODEX, sub, at(60 * 24)).action, "reclaim", "stale: someone takes it over and runs them");
+    const done = apply(L, verify(CLAUDE, "T1", "sha1", 8));
+    assert.equal(nextAction(done, CLAUDE, sub, at(9)).action, "merge");
+  });
+  test("a task that changes a workflow is verified on the machine", () => {
+    const L = run(ciLedger(), claim(CLAUDE, "T1", 1), push(CLAUDE, "T1", "sha1", 2, { touched: [".github/workflows/ci.yml"] }));
+    assert.deepEqual(nextAction(L, CLAUDE, green(), at(3)).cmd, ["collab", "verify", "T1", "--agent", CLAUDE]);
+    const done = apply(L, verify(CLAUDE, "T1", "sha1", 3));
+    assert.deepEqual(nextAction(done, CLAUDE, green(), at(4)).cmd, ["collab", "submit", "T1", "--agent", CLAUDE]);
   });
 });

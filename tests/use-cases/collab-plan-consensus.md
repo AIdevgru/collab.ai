@@ -9,7 +9,7 @@ Plan session #2 has two people, Zach and Alice, and the plan is at revision 2.
    - The status block shows Zach as agreed and the session as waiting on Alice.
 2. **Stale agreements are refused.** Agreeing to revision 1 while revision 2 is current exits 2, naming the current revision.
 3. **Agreeing in the browser.** Alice comments `/collab agree r2 <first 8 characters of the hash>`, the line the status block shows.
-   - The next collab command from anyone applies it: Alice agrees `via: comment`, and the comment itself is the record.
+   - The next collab command from anyone applies it, `collab plan status` included: Alice agrees `via: comment`, and the comment itself is the record. So when Zach checks with `status` right after Alice comments, it already shows the plan as agreed.
    - Everyone has now agreed, so the session becomes `agreed` and one "✅ Agreed: everyone agreed to revision 2" notice goes out.
 4. **Comments that don't count** are recorded as directives with `applied: false`, and change nothing:
    - a `/collab agree` from someone with read access, or from someone who never joined;

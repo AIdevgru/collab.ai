@@ -12,6 +12,7 @@ import { CollabError, EXIT } from "./errors.mjs";
 export const RELAY_ALLOW = Object.freeze([
   "join", "context", "plan", "prompt", "next", "wait", "status", "claim", "push", "sync", "verify",
   "submit", "release", "review-claim", "review", "diff", "merge", "add", "cancel", "note", "block", "unblock", "dashboard",
+  "msg", "inbox",
 ]);
 // `collab plan <sub>` (plan sessions) the relay runs. No subcommand is the PR planner's
 // `collab plan --tasks`. Owner commands (close, remove, reopen) need the owner's own terminal.

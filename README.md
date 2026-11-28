@@ -5,7 +5,7 @@
 - **Split the work.** The first agent writes a plan of up to 12 tasks.
 - **Claim without collisions.** A claim is a compare-and-swap push to a git ref.
 - **Build in parallel.** Each task gets its own worktree and sub-PR.
-- **Review across vendors.** Every task is reviewed by an agent from a different vendor than the one that built it.
+- **Review each other.** Any agent but a task's builder can review it. An agent from another vendor goes first, and one of the same vendor steps in when none is free (around, and not busy with its own task or another review) or after 10 minutes, so work keeps moving.
 - **Show a live dashboard.** Status, blockers and stats appear at the top of the PR for stakeholders.
 
 GitHub (git, `gh` and the PR thread) is the only channel between agents. There is no server, Slack or Discord.
@@ -35,11 +35,11 @@ In Claude Code, inside a clone of the repo:
 /collab https://github.com/owner/repo/pull/42
 ```
 
-Claude joins, writes the plan, and prints how to bring in a second vendor:
+Claude joins, writes the plan, and prints how to bring in another vendor:
 
 ```
 Plan: 5 tasks (T1–T5). Dashboard: https://github.com/owner/repo/pull/42
-Reviews are blocked until an agent from a second vendor joins.
+Any other agent can review a task; one from another vendor goes first, so add one if you can.
 To add Codex, paste into Codex:   $collab https://github.com/owner/repo/pull/42
 Or run: collab invite codex --pr 42       (launches it headless now)
 Other agents (Gemini, Grok…): run `collab prompt join 42 --tool <name>` and paste its output.
@@ -55,7 +55,8 @@ From then on every agent loops on `collab next`, which names the one thing to do
 | Cancel a task | Comment `/collab cancel T3` |
 | Resume | Run `collab resume --pr 42` in your own terminal |
 | Answer a question an agent escalated | Run `collab decide T3 "use TTL" --pr 42` |
-| Skip the cross-vendor review for one task | Run `collab waive-review T3 --pr 42` |
+| Skip the review for one task | Run `collab waive-review T3 --pr 42` |
+| Run several Claude sessions in parallel | `/collab <PR link> --sessions 4`, or run `collab invite claude --sessions 4 --pr 42` (see [Parallel sessions](#parallel-sessions)) |
 | Stop invited agents | Run `collab stop --pr 42` |
 | End the collab | Run `collab close --pr 42`. It archives the ledger to `~/.collab/archive/` and stops agents still in their loop. `--purge` also deletes the ledger ref |
 
@@ -73,6 +74,22 @@ PR comments can only stop work, never authorize it. The owner commands in the ta
 - **Model:** if Codex fails with "model is not supported" on your account, pass `--model` (for example `--model gpt-5.6-sol`). `collab doctor` shows Codex's default model.
 
 To join an interactive Codex yourself, paste `$collab <PR link>`. Its sandbox can't run git or gh, so start a relay first with `collab relay` in a terminal in the repo.
+
+### Parallel sessions
+
+To build faster with several sessions of one agent, ask for them in Claude Code:
+
+```
+/collab https://github.com/owner/repo/pull/42 --sessions 4
+```
+
+Claude is one of the four. After it writes the plan, it runs `collab invite claude --sessions 3 --pr 42 --agent <its id>`. You can run the same from your own terminal, without `--agent`, at any time.
+
+- **As many as there is work for.** A session keeper starts only as many headless sessions as there are tasks they can take now, at most N, and reserves one task for each. A task whose dependencies aren't done, or whose scope overlaps work in flight, doesn't start a session. With `--agent`, one task is always left for that agent while it is free.
+- **More as work unlocks.** About every 20 seconds the keeper checks again. As tasks unlock it starts more sessions, up to N at once. When a session stops mid-task, a new one takes over its task with `claim --steal`, keeping the branch and commits.
+- **Limits.** N is capped at `maxTasks` (12), and one keeper runs per PR. If two sessions in a row stop without doing any work (say the agent isn't signed in), the keeper stops starting them, and `collab status` says why.
+- **Status and stopping.** `collab status --pr 42` lists the running sessions and their tasks. The keeper exits by itself when every task is done or cancelled, when the collab is closed (`collab close` stops it), or at its `--timeout` (2 h). `collab stop --pr 42` stops the keeper first, then every session. `collab stop --run <keeper id> --pr 42` stops only the keeper, and its sessions finish their tasks.
+- **Reviews.** The sessions review each other's tasks, and when a task waits for a review that no free agent may take, the keeper starts a session to review it. An agent from another vendor still reviews first when one is free, so inviting Codex too (`collab invite codex --pr 42`) adds a second view. `--sessions` works for `codex` too: each Codex session gets its own relay.
 
 ## Plan together
 
@@ -128,12 +145,33 @@ Joining needs write access to the repository, and plan sessions need Git 2.43 or
   - Approvals are tied to the reviewed commit, and merges send that SHA, so a later push cancels the approval.
   - collab merges only sub-PRs into the PR branch, never into the default branch.
   - A sub-PR with no CI checks needs a passing `collab verify` at that commit.
+  - With the tests on CI (below), a merge needs CI passed at the approved commit, and collab asks GitHub again before merging.
   - Red CI on the main PR freezes merges and opens a fix-ci task.
 - **Configuration:** `verifyCmd` (and `setupCmd`) come only from `.collab.json` on the default branch. Without that file, `verifyCmd` falls back to `package.json` `scripts.test`. Agents can't change what runs.
 
 ```json
-{ "verifyCmd": "npm test", "setupCmd": "npm ci", "leaseMin": 90, "maxTasks": 12, "worktreeRoot": ".collab/wt" }
+{ "verifyCmd": "npm test", "setupCmd": "npm ci", "leaseMin": 90, "reviewWaitMin": 10, "maxTasks": 12, "worktreeRoot": ".collab/wt" }
 ```
+
+- **Tests on CI:** if the suite is slow on the agents' machines and fast on your CI runners, let CI run it:
+
+  ```json
+  { "verify": "ci", "ciWorkflows": ["ci.yml"] }
+  ```
+
+  - `collab verify T3` then starts `ci.yml` on T3's branch with `workflow_dispatch` and returns at once, so it works for draft sub-PRs and for CI that only runs for PRs into `main`. Each listed workflow needs a `workflow_dispatch:` trigger on the default branch; `collab join` warns about one that lacks it.
+  - The task goes to review while CI runs: the reviewer reads the diff and runs no tests, and may approve meanwhile. The merge waits for CI to pass.
+  - If CI fails, `collab next` sends the task back to its owner with the failing workflow and its link. `collab verify T3` at the same commit runs CI again, for a flaky run.
+  - A task that changes a workflow is tested on the machine instead, since CI on its branch would run that changed version.
+  - Your runners become the limit: with several sessions, runs queue there. `collab status` has a CI column. A run still waiting for a runner after an hour counts as failed.
+  - CI runs the agents' code on your runners, with whatever secrets the listed workflows give their jobs (a local verify strips secret-looking variables). List workflows that only run tests.
+
+- **Switching where the tests run:** `/collab tests` in Claude Code (or `collab tests` in a terminal) shows where they run. `/collab tests remote` moves them to CI, asking which workflows if the repo doesn't say (`--workflows ci.yml`). `/collab tests local` moves them back to the agents' machines. The switch is yours: it applies to your open collabs on the repo (those of this clone's GitHub account; other people's are left alone) and to the ones started here later (kept in this clone's git config), and what already passed stands. A task approved while its CI ran gets its tests run on the machine after a move back, before it merges. Sessions started for one agent can read it but not change it. From an agent's session, `/collab tests remote` only names workflows that run on pull requests or that `.collab.json` lists; naming another one (a deploy, say) takes your own terminal. Update every agent's collab before you move a collab to CI: an older collab can't write to it, but it could still merge a task its ledger shows approved.
+- **Status line:** `collab statusline` adds `(tests local)` or `(tests remote)` for the repo a Claude Code session is in. It reads only the clone's git data, never GitHub. Put your current status line command after `--`, and the segment goes at the end of its line (on Windows, anything but `node` runs through `cmd.exe`, so npm-installed status lines work). In `~/.claude/settings.json`:
+
+  ```json
+  "statusLine": { "type": "command", "command": "node \"$HOME/.collab/bin/collab.mjs\" statusline -- <your current status line command>" }
+  ```
 
 See `docs/design.md` for the full design and `docs/modules.md` for the module contracts.
 
@@ -142,7 +180,7 @@ See `docs/design.md` for the full design and `docs/modules.md` for the module co
 collab keeps **cooperative** agents from making mistakes. It is not a defence against a hostile agent.
 
 - Every agent runs as your OS user and posts as your GitHub account, so an agent that ignores the rules could bypass the CLI.
-- The cross-vendor review is recorded in the ledger, not cryptographically proven.
+- Who reviewed a task is recorded in the ledger, not cryptographically proven.
 - Within those limits, PR text, comments and other agents' output are treated as untrusted data, and the commands that run code come from the default branch only.
 
 Protect your default branch: `collab join` warns when it isn't protected.

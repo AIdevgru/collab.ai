@@ -280,6 +280,45 @@ export function liveSnapshot(repo, mainN, subs = {}, { auth } = {}) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Actions: the workflows `collab verify` runs on a task's branch ("verify": "ci" in .collab.json)
+
+const WORKFLOW_FILE_RE = /^[A-Za-z0-9_.-]+\.ya?ml$/;
+const SHA_RE = /^[0-9a-f]{7,40}$/i;
+
+function checkWorkflow(workflow) {
+  if (typeof workflow !== "string" || !WORKFLOW_FILE_RE.test(workflow)) throw new CollabError(EXIT.PRECONDITION, `not a workflow file name: "${workflow}"`);
+  return workflow;
+}
+
+// Starts a workflow_dispatch run of `workflow` on branch `ref`. GitHub runs the workflow file as
+// it is on that branch, and answers with no run id: find the run with workflowRuns.
+export function dispatchWorkflow(repo, workflow, ref, { auth } = {}) {
+  const at = `repos/${checkRepo(repo)}/actions/workflows/${checkWorkflow(workflow)}/dispatches`;
+  try {
+    api("POST", at, { body: { ref: String(ref) }, auth });
+  } catch (e) {
+    const status = e instanceof CollabError ? e.details?.status : null;
+    if (status === 404) throw new CollabError(EXIT.PRECONDITION, `GitHub has no workflow ${workflow} in ${repo}. ciWorkflows in .collab.json names files in .github/workflows on the default branch.`, e.details);
+    if (status === 422) throw new CollabError(EXIT.PRECONDITION, `GitHub can't start ${workflow} on ${ref} (${firstLine(e.details?.stderr) || "HTTP 422"}). Its on: block on the default branch needs a workflow_dispatch: trigger with no required inputs, and the branch must exist on GitHub.`, e.details);
+    throw e;
+  }
+}
+
+// The runs of `workflow` at commit `sha`, newest first: { id, url, status, conclusion, event, createdAt }.
+// status is queued | in_progress | waiting | requested | pending | completed.
+export function workflowRuns(repo, workflow, sha, { auth } = {}) {
+  if (typeof sha !== "string" || !SHA_RE.test(sha)) throw new CollabError(EXIT.PRECONDITION, `not a commit SHA: "${sha}"`);
+  const r = api("GET", `repos/${checkRepo(repo)}/actions/workflows/${checkWorkflow(workflow)}/runs`, { fields: { head_sha: sha, per_page: 20 }, auth });
+  return (Array.isArray(r?.workflow_runs) ? r.workflow_runs : [])
+    .map((x) => ({
+      id: Number(x.id), url: x.html_url ?? null, status: x.status ?? null, conclusion: x.conclusion ?? null,
+      event: x.event ?? null, createdAt: x.created_at ?? null, sha: x.head_sha ?? null,
+    }))
+    .filter((x) => !x.sha || x.sha === sha)
+    .sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0) || b.id - a.id);
+}
+
 export function createPr(repo, { base, head, title, body, draft = false }, { auth } = {}) {
   const r = api("POST", `repos/${checkRepo(repo)}/pulls`, { body: { base, head, title, body: body ?? "", draft: Boolean(draft) }, auth });
   return { number: r.number, url: r.html_url };
@@ -327,6 +366,24 @@ export function commentsSince(repo, n, sinceId, { auth, sinceAt } = {}) {
     .filter((c) => Number(c.id) > since)
     .sort((a, b) => Number(a.id) - Number(b.id))
     .map((c) => ({ id: c.id, login: c.user?.login ?? null, body: c.body ?? "", createdAt: c.created_at ?? null, url: c.html_url ?? null }));
+}
+
+// Every issue and PR comment in the repo with id > sinceId, oldest first, each with the number of
+// the issue or PR it is on. One request covers the main PR and all its sub-PRs; comment ids grow
+// across a repo, so one cursor serves them all. Pass sinceAt: without it GitHub sends every
+// comment the repo has.
+export function repoCommentsSince(repo, sinceId, { auth, sinceAt } = {}) {
+  const fields = { sort: "created", direction: "asc", per_page: 100 };
+  if (sinceAt && !Number.isNaN(Date.parse(sinceAt))) fields.since = new Date(sinceAt).toISOString();
+  const list = api("GET", `repos/${checkRepo(repo)}/issues/comments`, { fields, auth, paginate: true }) ?? [];
+  const since = Number(sinceId) || 0;
+  return list
+    .filter((c) => Number(c.id) > since)
+    .sort((a, b) => Number(a.id) - Number(b.id))
+    .map((c) => ({
+      id: c.id, pr: Number(/\/issues\/(\d+)$/.exec(c.issue_url ?? "")?.[1]) || null,
+      login: c.user?.login ?? null, body: c.body ?? "", createdAt: c.created_at ?? null, url: c.html_url ?? null,
+    }));
 }
 
 // The newest issue or PR comment in the whole repo, { id, createdAt }, or null. Comment ids grow

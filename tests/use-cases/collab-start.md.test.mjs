@@ -61,7 +61,7 @@ test("posting the plan prints the first-run block for the owner", () => {
   const r = s.run(path.join(s.clone("claude"), ".collab"), ["plan", "--tasks", writePlan("claude", 4), "--pr", "1", "--agent", claude]);
   assert.equal(r.code, 0, r.out);
   assert.match(r.out, /Plan: 4 tasks \(T1–T4\)\. Dashboard: https:\/\/github\.com\/o\/r\/pull\/1/);
-  assert.match(r.out, /Agents from 2 vendors have joined|Reviews are blocked until an agent from a second vendor joins/);
+  assert.match(r.out, /Agents from 2 vendors have joined|Any other agent can review a task; one from another vendor goes first/);
   assert.match(r.out, /paste into Codex: {3}\$collab https:\/\/github\.com\/o\/r\/pull\/1/);
   assert.match(r.out, /collab invite codex --pr 1/);
   assert.match(r.out, /collab prompt join 1 --tool <name>/);

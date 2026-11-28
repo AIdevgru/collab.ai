@@ -21,15 +21,21 @@ function later(prev, at, strict) {
 }
 
 // `people` ({ alice: "write", bob: "read" }) adds collaborators with those roles and tokens
-// tok-<login>; zwymer is always the admin with tok-z.
-export function setup({ pr = 1, body = "Owner notes.\n\n- [ ] add helpers\n\nHUMAN TEXT SENTINEL\n", headRef = "feat/x", verify = true, prState = {}, people = {} } = {}) {
+// tok-<login>; zwymer is always the admin with tok-z. `config` adds keys to .collab.json, `files`
+// ({ path: text }) adds files to the default branch with it, and `repoState` adds to the fake
+// repo (workflows, runs).
+export function setup({ pr = 1, body = "Owner notes.\n\n- [ ] add helpers\n\nHUMAN TEXT SENTINEL\n", headRef = "feat/x", verify = true, prState = {}, people = {}, config = {}, files = {}, repoState = {} } = {}) {
   const repo = makeRepo();
   const owner = repo.clone("owner");
   // Give the default branch a test command and a tiny library so collab verify has something to run.
   if (verify) {
-    writeFileSync(path.join(owner, ".collab.json"), JSON.stringify({ verifyCmd: ["node", "--test"] }, null, 2));
+    writeFileSync(path.join(owner, ".collab.json"), JSON.stringify({ verifyCmd: ["node", "--test"], ...config }, null, 2));
     mkdirSync(path.join(owner, "test"), { recursive: true });
     writeFileSync(path.join(owner, "test", "ok.test.mjs"), "import { test } from 'node:test';\ntest('ok', () => {});\n");
+    for (const [rel, text] of Object.entries(files)) {
+      mkdirSync(path.dirname(path.join(owner, rel)), { recursive: true });
+      writeFileSync(path.join(owner, rel), text);
+    }
     sh(["checkout", "-q", "main"], owner);
     sh(["add", "-A"], owner);
     sh(["commit", "-q", "-m", "collab config"], owner);
@@ -43,7 +49,7 @@ export function setup({ pr = 1, body = "Owner notes.\n\n- [ ] add helpers\n\nHUM
   const fake = makeFakeGh({
     user: "zwymer",
     tokens: { zwymer: "tok-z", ...Object.fromEntries(extra.map(([login]) => [login, `tok-${login}`])) },
-    repos: { [REPO]: { defaultBranch: "main", allowSquash: true, allowMerge: true, private: true, protected: ["main"], collaborators: { zwymer: "admin", reader: "read", ...Object.fromEntries(extra) }, gitDir: repo.remote } },
+    repos: { [REPO]: { defaultBranch: "main", allowSquash: true, allowMerge: true, private: true, protected: ["main"], collaborators: { zwymer: "admin", reader: "read", ...Object.fromEntries(extra) }, gitDir: repo.remote, ...repoState } },
     pulls: { [`${REPO}#${pr}`]: { title: "Add string helpers", body, state: "open", merged: false, draft: false, headRef, baseRef: "main", headSha, isCrossRepository: false, mergeable: "MERGEABLE", ci: "SUCCESS", checks: 2, additions: 10, deletions: 1, ...prState } },
     comments: { [`${REPO}#${pr}`]: [] },
   });

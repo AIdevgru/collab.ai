@@ -3,7 +3,7 @@ import { describe, test } from "node:test";
 import { addMinutes } from "../../skills/collab/lib/clock.mjs";
 import { CollabError, EXIT } from "../../skills/collab/lib/errors.mjs";
 import {
-  PHASES, SCHEMA, STATUSES, VENDORS, apply, cancelledDeps, derive, isTerminal, newLedger, taskIds, unmetDeps, vendorOf,
+  PHASES, SCHEMA, STATUSES, VENDORS, apply, cancelledDeps, ciAt, ciMode, derive, isTerminal, newLedger, reviewTurn, taskIds, touchesWorkflows, unmetDeps, vendorOf, verified,
 } from "../../skills/collab/lib/ledger.mjs";
 
 // ---------------------------------------------------------------- fixtures (time is pinned)
@@ -80,7 +80,7 @@ function deepFreeze(o) {
 
 describe("exports", () => {
   test("constants", () => {
-    assert.equal(SCHEMA, 1);
+    assert.equal(SCHEMA, 2, "the newest schema understood; 2 runs the tests on CI");
     assert.deepEqual([...STATUSES], ["open", "claimed", "in_review", "changes_requested", "approved", "done", "cancelled"]);
     assert.deepEqual([...PHASES], ["planning", "active", "paused", "closed"]);
     assert.deepEqual({ ...VENDORS }, { claude: "anthropic", codex: "openai", gemini: "google", grok: "xai", other: "other" });
@@ -116,7 +116,7 @@ describe("newLedger", () => {
     assert.deepEqual(L.notices, {});
   });
   test("default config, overridable", () => {
-    assert.deepEqual(fresh().config, { leaseMin: 90, reviewLeaseMin: 60, planLeaseMin: 15, reviewAlertH: 2, maxTasks: 12, wip: 1, worktreeRoot: ".collab/wt", verifyCmd: null, setupCmd: null });
+    assert.deepEqual(fresh().config, { leaseMin: 90, reviewLeaseMin: 60, planLeaseMin: 15, reviewAlertH: 2, reviewWaitMin: 10, maxTasks: 12, wip: 1, worktreeRoot: ".collab/wt", verify: "local", verifyCmd: null, setupCmd: null });
     const L = fresh({ leaseMin: 2, planLeaseMin: 5, verifyCmd: ["npm", "test"], wip: undefined });
     assert.equal(L.config.leaseMin, 2);
     assert.equal(L.config.wip, 1);
@@ -180,7 +180,8 @@ describe("apply: general", () => {
     refused(() => apply(planned(), { agent: CLAUDE, at: T0 }), EXIT.BUG);
   });
   test("a newer schema is refused", () => {
-    refused(() => apply({ ...planned(), schema: 2 }, ev("agent.seen", CLAUDE, null)), EXIT.ENV, /schema 2/);
+    refused(() => apply({ ...planned(), schema: 3 }, ev("agent.seen", CLAUDE, null)), EXIT.ENV, /schema 3, but this collab understands schema 1 and 2/);
+    assert.equal(apply({ ...planned(), schema: 2 }, ev("agent.seen", CLAUDE, null)).schema, 2);
   });
   test("refusals name the actor, the task and its status", () => {
     refused(() => apply(state("in_review"), submit(CLAUDE, "T1", "sha1", 9)), EXIT.PRECONDITION, /claude-a1f3 can't submit T1 \(in_review\)/);
@@ -579,9 +580,13 @@ describe("submit", () => {
   });
 });
 
-describe("cross-vendor review", () => {
-  test("a reviewer from the same vendor is refused", () => {
-    refused(() => apply(state("in_review"), rclaim(CLAUDE2, "T1", 5)), EXIT.PRECONDITION, /another vendor than claude-a1f3 \(anthropic\)/);
+describe("review", () => {
+  test("a reviewer from the owner's vendor may review: the preference for another vendor is next's", () => {
+    const L = apply(state("in_review"), rclaim(CLAUDE2, "T1", 5));
+    assert.equal(L.tasks.T1.reviewer, CLAUDE2);
+    const V = apply(L, verdict(CLAUDE2, "T1", "approve", "sha1", 6));
+    assert.equal(V.tasks.T1.status, "approved");
+    assert.deepEqual(V.tasks.T1.reviews.map((r) => [r.agent, r.vendor]), [[CLAUDE2, "anthropic"]]);
   });
   test("the owner can't review their own task", () => {
     refused(() => apply(state("in_review"), rclaim(CLAUDE, "T1", 5)), EXIT.PRECONDITION, /your own task/);
@@ -826,18 +831,66 @@ describe("derive", () => {
     assert.deepEqual([derive(R, at(66)).tasks.T1.waitingReview, derive(R, at(66)).tasks.T1.reviewStale], [true, true]);
     assert.equal(derive(state("approved"), at(5)).tasks.T1.waitingReview, false);
   });
-  test("eligibleReviewers: other vendors, never the owner", () => {
-    assert.deepEqual(derive(state("in_review"), at(5)).tasks.T1.eligibleReviewers, [CODEX]);
+  test("eligibleReviewers: every agent but the owner; preferredReviewers: those of another vendor", () => {
+    const d = derive(state("in_review"), at(5)).tasks.T1;
+    assert.deepEqual(d.eligibleReviewers.sort(), [CODEX, CLAUDE2].sort());
+    assert.deepEqual(d.preferredReviewers, [CODEX]);
     const G = apply(state("in_review"), ev("agent.join", GEMINI, null, { tool: "gemini" }, 5));
-    assert.deepEqual(derive(G, at(5)).tasks.T1.eligibleReviewers, [CODEX, GEMINI]);
+    assert.deepEqual(derive(G, at(5)).tasks.T1.preferredReviewers.sort(), [CODEX, GEMINI].sort());
     const C = run(planned(), claim(CODEX, "T2", 1));
-    assert.deepEqual(derive(C, at(5)).tasks.T2.eligibleReviewers, [CLAUDE, CLAUDE2]);
+    assert.deepEqual(derive(C, at(5)).tasks.T2.eligibleReviewers.sort(), [CLAUDE, CLAUDE2].sort());
     assert.deepEqual(derive(C, at(5)).tasks.T4.eligibleReviewers, []);
+  });
+  test("a review opens to the owner's vendor reviewWaitMin after the submit while another vendor is around, at once otherwise", () => {
+    // T1 was submitted at minute 4; CODEX joined at minute 1, so it is around.
+    const L = state("in_review");
+    assert.equal(derive(L, at(5)).tasks.T1.reviewOpenAt, at(14));
+    assert.equal(derive(L, at(5)).tasks.T1.reviewOpen, false);
+    assert.equal(derive(L, at(5)).nextReviewOpen, at(14));
+    assert.equal(derive(L, at(14)).tasks.T1.reviewOpen, true);
+    assert.equal(derive(L, at(14)).nextReviewOpen, null);
+    // reviewWaitMin comes from the ledger's config (.collab.json).
+    const short = structuredClone(L);
+    short.config.reviewWaitMin = 3;
+    assert.equal(derive(short, at(5)).tasks.T1.reviewOpenAt, at(7));
+    // Submitted at 50, CODEX last seen at 1: not around, so it is open at once.
+    const late = run(planned(), claim(CLAUDE, "T1", 40), push(CLAUDE, "T1", "sha1", 41), verify(CLAUDE, "T1", "sha1", true, 42), submit(CLAUDE, "T1", "sha1", 50));
+    assert.equal(derive(late, at(51)).tasks.T1.reviewOpenAt, at(50));
+    assert.equal(derive(late, at(51)).tasks.T1.reviewOpen, true);
+    // Not waiting for a reviewer: no opening time.
+    assert.equal(derive(state("reviewing"), at(6)).tasks.T1.reviewOpenAt, null);
+    assert.equal(derive(state("claimed"), at(6)).tasks.T1.reviewOpenAt, null);
+  });
+  test("a review waits only for an agent of another vendor that is free: not building a task, not holding a review", () => {
+    // CODEX builds T2 (claimed, lease live). `next` has it finish T2 first, so T1's review opens at its submit.
+    const building = run(state("in_review"), claim(CODEX, "T2", 4));
+    assert.equal(derive(building, at(5)).tasks.T1.reviewOpenAt, at(4));
+    assert.equal(derive(building, at(5)).tasks.T1.reviewOpen, true);
+    assert.equal(derive(building, at(5)).nextReviewOpen, null);
+    // Sent back for changes counts as building too.
+    const fixing = run(planned(), ...[claim(CODEX, "T2", 1), push(CODEX, "T2", "c1", 2), verify(CODEX, "T2", "c1", true, 2), submit(CODEX, "T2", "c1", 2), rclaim(CLAUDE2, "T2", 2), verdict(CLAUDE2, "T2", "changes", "c1", 3)],
+      claim(CLAUDE, "T1", 1), push(CLAUDE, "T1", "sha1", 2), verify(CLAUDE, "T1", "sha1", true, 3), submit(CLAUDE, "T1", "sha1", 4));
+    assert.equal(derive(fixing, at(5)).tasks.T1.reviewOpen, true);
+    // CODEX holds a review of T4: busy as well.
+    const reviewing = run(state("in_review"), claim(CLAUDE2, "T4", 2), push(CLAUDE2, "T4", "d1", 2), verify(CLAUDE2, "T4", "d1", true, 2), submit(CLAUDE2, "T4", "d1", 2), rclaim(CODEX, "T4", 3));
+    assert.equal(derive(reviewing, at(5)).tasks.T1.reviewOpen, true);
+    // ...unless T4 is blocked: `next` skips that review and offers CODEX others, so it is free.
+    const blockedReview = run(reviewing, ev("task.block", CLAUDE2, "T4", { reason: "which API?", needsOwner: true }, 4));
+    assert.equal(derive(blockedReview, at(5)).tasks.T1.reviewOpenAt, at(14));
+    // A blocked task doesn't keep its owner busy: CODEX is free, so the review waits for it again.
+    const blocked = run(building, ev("task.block", CODEX, "T2", { reason: "which API?", needsOwner: true }, 4));
+    assert.equal(derive(blocked, at(5)).tasks.T1.reviewOpenAt, at(14));
+    // One free agent of another vendor is enough to hold it: GEMINI has joined and holds nothing.
+    const gemini = run(building, ev("agent.join", GEMINI, null, { tool: "gemini" }, 4));
+    assert.equal(derive(gemini, at(5)).tasks.T1.reviewOpenAt, at(14));
+    // Whoever is busy, an agent of another vendor still gets the review first when it asks.
+    assert.equal(reviewTurn(building, derive(building, at(5)), "T1", CODEX), "preferred");
+    assert.equal(reviewTurn(building, derive(building, at(5)), "T1", CLAUDE2), "open");
   });
   test("liveAgents and nextLeaseExpiry", () => {
     // Planning: only the planner.
-    assert.deepEqual(derive(fresh(), at(1)), { tasks: {}, liveAgents: [CLAUDE], nextLeaseExpiry: at(15) });
-    assert.deepEqual(derive(fresh(), at(16)), { tasks: {}, liveAgents: [], nextLeaseExpiry: null });
+    assert.deepEqual(derive(fresh(), at(1)), { tasks: {}, liveAgents: [CLAUDE], nextLeaseExpiry: at(15), nextReviewOpen: null });
+    assert.deepEqual(derive(fresh(), at(16)), { tasks: {}, liveAgents: [], nextLeaseExpiry: null, nextReviewOpen: null });
     // CLAUDE owns T1 in review (lease to 91), CODEX reviews it (to 65), CLAUDE2 claims T2 (lease to 110).
     const L = run(state("reviewing"), claim(CLAUDE2, "T2", 20));
     const d = derive(L, at(30));
@@ -1038,5 +1091,125 @@ describe("owner questions and decisions", () => {
     assert.equal(L.tasks.T1.decision.text, "A");
     L = apply(L, ev("task.unblock", CLAUDE, "T1", {}, 5));
     assert.equal(L.tasks.T1.decision.text, "A");
+  });
+});
+
+describe("CI runs the tests (\"verify\": \"ci\")", () => {
+  const CI = { verify: "ci", ciWorkflows: ["ci.yml"] };
+  const URL = (id) => `https://github.com/o/r/actions/runs/${id}`;
+  const started = (agent = CLAUDE, sha = "sha1", min = 3, since = { "ci.yml": 40 }) => ev("task.ci", agent, "T1", { sha, state: "started", runs: [{ workflow: "ci.yml" }], since }, min);
+  const result = (state, agent = CLAUDE, sha = "sha1", min = 5, extra = {}) => ev("task.ci", agent, "T1", { sha, state, runs: [{ workflow: "ci.yml", id: 77, url: URL(77), status: "completed", conclusion: state === "passed" ? "success" : "failure" }], summary: `ci.yml ${state}`, ...extra }, min);
+  const pushedCi = (extra) => run(state("claimed", planned(DEFAULT_TASKS, CI)), push(CLAUDE, "T1", "sha1", 2, extra));
+  const WF = { touched: [".github/workflows/ci.yml"] };
+
+  test("ciMode reads the config; ciAt only answers for the head; a ledger on CI is schema 2", () => {
+    assert.equal(ciMode(fresh()), false);
+    assert.equal(ciMode(fresh(CI)), true);
+    assert.equal(fresh().schema, 1);
+    assert.equal(fresh(CI).schema, 2, "a collab from before CI mode refuses it instead of merging without CI");
+    const L = apply(pushedCi(), started());
+    assert.equal(ciAt(L.tasks.T1).state, "running");
+    assert.equal(ciAt(apply(L, push(CLAUDE, "T1", "sha2", 4)).tasks.T1), null);
+  });
+  test("the owner or the reviewer starts it at the head, once while it runs, keeping the run baseline", () => {
+    const L = pushedCi();
+    refused(() => apply(L, started(CODEX)), EXIT.PRECONDITION, /only the owner \(claude-a1f3\) or the reviewer \(none\) can start CI/);
+    refused(() => apply(L, started(CLAUDE, "sha0")), EXIT.PRECONDITION, /the head is sha1, not sha0/);
+    const s1 = apply(L, started(CLAUDE, "sha1", 3, { "ci.yml": 40, "../x.yml": 1, "lint.yml": -1 }));
+    assert.deepEqual(s1.tasks.T1.ci, { sha: "sha1", state: "running", by: CLAUDE, at: at(3), runs: [{ workflow: "ci.yml", id: null, url: null, status: null, conclusion: null }], summary: "", since: { "ci.yml": 40 } });
+    refused(() => apply(s1, started(CLAUDE, "sha1", 4)), EXIT.PRECONDITION, /CI is already running at sha1/);
+  });
+  test("CI isn't started for a task that changes a workflow, nor when the tests run on the machines", () => {
+    refused(() => apply(pushedCi(WF), started()), EXIT.PRECONDITION, /it changes a workflow, so its tests run on the machine/);
+    assert.deepEqual(touchesWorkflows(pushedCi(WF).tasks.T1), [".github/workflows/ci.yml"]);
+    assert.deepEqual(touchesWorkflows({ touched: ["src\\a.mjs", ".github\\actions\\setup\\action.yml"] }), [".github\\actions\\setup\\action.yml"]);
+    const local = run(state("claimed"), push(CLAUDE, "T1", "sha1", 2));
+    refused(() => apply(local, started()), EXIT.PRECONDITION, /runs the tests on the agents' machines, not on CI/);
+  });
+  test("with the tests on CI, a verify from a machine counts only for a task that changes a workflow", () => {
+    refused(() => apply(pushedCi(), verify(CLAUDE, "T1", "sha1", true)), EXIT.PRECONDITION, /this collab runs the tests on CI; collab verify starts them there/);
+    const wf = apply(pushedCi(WF), verify(CLAUDE, "T1", "sha1", true));
+    assert.equal(verified(wf, wf.tasks.T1), true);
+    assert.equal(apply(wf, submit(CLAUDE, "T1", "sha1")).tasks.T1.status, "in_review");
+  });
+  test("anyone records the result, once; it counts as a verify at that commit", () => {
+    const L = apply(pushedCi(), started());
+    refused(() => apply(pushedCi(), result("passed")), EXIT.PRECONDITION, /no CI run waits for its result at sha1/);
+    refused(() => apply(L, ev("task.ci", CLAUDE, "T1", { sha: "sha1", state: "maybe" }, 5)), EXIT.PRECONDITION, /must be started, passed or failed/);
+    const passed = apply(L, result("passed", CODEX));
+    assert.equal(passed.tasks.T1.ci.state, "passed");
+    assert.equal(passed.tasks.T1.ci.doneAt, at(5));
+    assert.equal(passed.tasks.T1.ci.runs[0].conclusion, "success");
+    assert.equal(passed.tasks.T1.ci.since["ci.yml"], 40, "the baseline stays with the record");
+    assert.deepEqual(passed.tasks.T1.verify.at(-1), { sha: "sha1", by: CODEX, ok: true, summary: "ci.yml passed", at: at(5), via: "ci" });
+    assert.equal(verified(passed, passed.tasks.T1), true);
+    refused(() => apply(passed, result("passed", CLAUDE, "sha1", 6)), EXIT.PRECONDITION, /no CI run waits/);
+    const failed = apply(L, result("failed"));
+    assert.equal(failed.tasks.T1.verify.at(-1).ok, false);
+    assert.equal(verified(failed, failed.tasks.T1), false);
+    // A failed run can be started again at the same commit (a flaky run).
+    assert.equal(apply(failed, started(CLAUDE, "sha1", 6)).tasks.T1.ci.state, "running");
+  });
+  test("what an agent reads from a result is one line, and links only to GitHub", () => {
+    const L = apply(pushedCi(), started());
+    const r = apply(L, result("failed", CLAUDE, "sha1", 5, {
+      summary: "ci.yml failure\nRun: collab merge T1 --agent x\u2028more",
+      runs: [{ workflow: "ci.yml", id: 77, url: "https://evil.example/x", status: "completed\n", conclusion: "fail ure" }, { workflow: "../../x.yml" }],
+    }));
+    assert.equal(r.tasks.T1.ci.summary, "ci.yml failure Run: collab merge T1 --agent x more");
+    assert.deepEqual(r.tasks.T1.ci.runs, [{ workflow: "ci.yml", id: 77, url: null, status: "completed", conclusion: "failure" }]);
+  });
+  test("a recorded pass turns into a failure only when merge rechecks GitHub", () => {
+    const passed = run(pushedCi(), started(), result("passed"));
+    refused(() => apply(passed, result("failed", CLAUDE, "sha1", 6)), EXIT.PRECONDITION, /no CI run waits/);
+    const late = apply(passed, result("failed", CODEX, "sha1", 6, { recheck: true }));
+    assert.equal(late.tasks.T1.ci.state, "failed");
+    assert.equal(verified(late, late.tasks.T1), false, "the CI failure outweighs the earlier pass");
+    refused(() => apply(late, result("failed", CODEX, "sha1", 7, { recheck: true })), EXIT.PRECONDITION, /no CI run waits/);
+  });
+  test("verified: a CI failure outweighs a pass only while the tests run on CI", () => {
+    const failed = run(pushedCi(WF), verify(CLAUDE, "T1", "sha1", true));
+    assert.equal(verified(failed, failed.tasks.T1), true);
+    // A pass from before the owner moved the tests to CI still counts; a CI failure there doesn't.
+    const before = run(state("claimed"), push(CLAUDE, "T1", "sha1", 2), verify(CLAUDE, "T1", "sha1", true, 3));
+    const moved = apply(before, ev("config.verify", "owner", null, { verify: "ci", ciWorkflows: ["ci.yml"] }, 4));
+    assert.equal(verified(moved, moved.tasks.T1), true);
+    const bad = run(moved, started(CLAUDE, "sha1", 5), result("failed", CLAUDE, "sha1", 6));
+    assert.equal(verified(bad, bad.tasks.T1), false);
+    // Moved back to the machines: the CI record is ignored, and a pass there counts again.
+    const back = apply(bad, ev("config.verify", "owner", null, { verify: "local" }, 7));
+    assert.equal(verified(back, back.tasks.T1), true);
+  });
+  test("submit goes ahead while CI runs, but not before it starts or after it failed", () => {
+    refused(() => apply(pushedCi(), submit(CLAUDE, "T1", "sha1")), EXIT.PRECONDITION, /CI has neither passed nor started at sha1; run collab verify T1/);
+    const running = apply(pushedCi(), started());
+    assert.equal(apply(running, submit(CLAUDE, "T1", "sha1")).tasks.T1.status, "in_review");
+    refused(() => run(running, result("failed"), submit(CLAUDE, "T1", "sha1", 6)), EXIT.PRECONDITION, /CI failed at sha1; fix it first/);
+    // Without CI mode a started CI does not let a submit through.
+    const local = run(state("claimed"), push(CLAUDE, "T1", "sha1", 2));
+    refused(() => apply(local, submit(CLAUDE, "T1", "sha1")), EXIT.PRECONDITION, /no passing collab verify at sha1/);
+  });
+  test("the result can come in after the approval", () => {
+    const L = run(pushedCi(), started(), submit(CLAUDE, "T1", "sha1"), rclaim(CODEX, "T1", 5), verdict(CODEX, "T1", "approve", "sha1", 6));
+    assert.equal(L.tasks.T1.status, "approved");
+    assert.equal(apply(L, result("passed", CLAUDE, "sha1", 7)).tasks.T1.ci.state, "passed");
+  });
+  test("only the owner moves the tests, to CI only with workflows, also while planning or paused", () => {
+    const L = planned();
+    refused(() => apply(L, ev("config.verify", CLAUDE, null, { verify: "ci", ciWorkflows: ["ci.yml"] })), EXIT.PRECONDITION, /only the owner can say where the tests run/);
+    refused(() => apply(L, ev("config.verify", "owner", null, { verify: "ci" })), EXIT.PRECONDITION, /needs ciWorkflows/);
+    refused(() => apply(L, ev("config.verify", "owner", null, { verify: "ci", ciWorkflows: ["../x.yml"] })), EXIT.PRECONDITION, /must list workflow file names/);
+    refused(() => apply(L, ev("config.verify", "owner", null, { verify: "remote" })), EXIT.PRECONDITION, /must be "local" or "ci"/);
+    const ci = apply(L, ev("config.verify", "owner", null, { verify: "ci", ciWorkflows: ["ci.yml", "ci.yml"] }));
+    assert.equal(ci.config.verify, "ci");
+    assert.deepEqual(ci.config.ciWorkflows, ["ci.yml"]);
+    assert.equal(ci.schema, 2);
+    const back = apply(ci, ev("config.verify", "owner", null, { verify: "local" }, 2));
+    assert.equal(back.config.verify, "local");
+    assert.equal(back.schema, 2, "the schema never goes back");
+    assert.equal(apply(back, ev("config.verify", "owner", null, { verify: "ci" }, 3)).config.verify, "ci", "the workflows set before still count");
+    assert.equal(apply(fresh(), ev("config.verify", "owner", null, { verify: "local" })).config.verify, "local", "while planning");
+    const paused = apply(state("claimed"), ev("phase.set", "owner", null, { phase: "paused" }, 5));
+    assert.equal(apply(paused, ev("config.verify", "owner", null, { verify: "ci", ciWorkflows: ["ci.yml"] }, 6)).config.verify, "ci", "while paused");
   });
 });

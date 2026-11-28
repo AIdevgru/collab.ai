@@ -116,7 +116,7 @@ describe("dashboard: status", () => {
     const fxSolo = solo.fixture(10, green({ subs: { T1: sub(solo, "T1", "SUCCESS") } }));
     assert.equal(keyOf(fxSolo), "blocked");
     const md = show(fxSolo);
-    assert.match(md, /no agent from another vendor has joined\. Invite an agent from another vendor, or the owner can run `collab waive-review T1 --pr 42`/);
+    assert.match(md, /no other agent has joined\. Invite one \(an agent from another vendor reviews first\), or run `collab waive-review T1 --pr 42` in your own terminal/);
     // Blocked still wins once every lease has run out.
     assert.equal(keyOf(fxSolo, fxSolo.live, at(600)), "blocked");
   });
@@ -338,11 +338,14 @@ describe("dashboard: render", () => {
       ev("task.merge", "T3", {}, 79), ev("review.verdict", "T3", { verdict: "changes" }, 78), ev("review.verdict", "T3", { verdict: "approve" }, 77),
       ev("comments.seen", null, { lastCommentId: 5 }, 76, "owner"), ev("agent.seen", null, {}, 75), null, {}, { sha: "x", at: at(74) },
       ev("task.submit", "T3", {}, 73), ev("task.claim", "T3", { steal: true }, 72), ev("weird.thing", "T3", {}, 71),
+      ev("agent.msg", null, { to: CLAUDE, body: "SECRET BODY" }, 70), ev("agent.msg", null, { to: "all", body: "SECRET BODY" }, 69),
+      ev("comment.new", null, { login: "zwymer", pr: 42, body: "SECRET BODY" }, 68, "owner"), ev("comment.new", "T3", { login: "zwymer", pr: 59, body: "SECRET BODY" }, 67, "owner"),
       { sha: "y", at: at(-1500), event: { type: "task.claim", agent: CLAUDE, task: "T1", data: {} } },
     ];
     const md = render(fx.ledger, fx.live, history, fx.now, {});
     const list = /<details><summary>Recent activity \(last (\d+) events\)<\/summary>\n\n([\s\S]*?)\n\n<\/details>/.exec(md);
-    assert.equal(list[1], "7");
+    assert.equal(list[1], "11");
+    assert.ok(!md.includes("SECRET BODY"), "messages and comments are named on the dashboard, not quoted");
     assert.deepEqual(list[2].split("\n"), [
       "- 13:19 UTC: codex-7k2p merged T3",
       "- 13:18 UTC: codex-7k2p requested changes on T3",
@@ -350,6 +353,10 @@ describe("dashboard: render", () => {
       "- 13:13 UTC: codex-7k2p submitted T3 for review",
       "- 13:12 UTC: codex-7k2p took over T3",
       "- 13:11 UTC: codex-7k2p recorded weird.thing on T3",
+      "- 13:10 UTC: codex-7k2p sent a message to claude-a1f3",
+      "- 13:09 UTC: codex-7k2p sent a message to every agent",
+      "- 13:08 UTC: zwymer commented on the PR",
+      "- 13:07 UTC: zwymer commented on T3's sub-PR",
       "- 2026-11-15 11:00 UTC: claude-a1f3 claimed T1",
     ]);
     assert.ok(!render(fx.ledger, fx.live, "not a list", fx.now, {}).includes("Recent activity"));

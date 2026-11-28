@@ -1,7 +1,7 @@
 // Use case: tests/use-cases/collab-plan-start.md
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { ok, planSetup } from "../helpers/plan-env.mjs";
 
@@ -109,4 +109,17 @@ test("a pull request number is not a plan session", () => {
 test("collab plan --tasks still posts a PR collab's task split", () => {
   const ids = p.s.start([{ title: "Helpers", accept: ["works"], scope: ["src/h.mjs"], size: "S" }], []);
   assert.match(ids.claude, /^claude-/);
+});
+
+test("joining a plan adds it to the agent's file and keeps the PR inbox position there", () => {
+  const id = p.ids[n].alice;
+  const file = path.join(p.s.home, "agents", `${id}.json`);
+  const before = JSON.parse(readFileSync(file, "utf8"));
+  writeFileSync(file, JSON.stringify({ ...before, pr: 1, repo: "o/r", read: { "o/r#1": 7 } }));
+
+  ok(p.run("alice", ["plan", "join", String(n), "--tool", "claude", "--agent", id]));
+  const saved = JSON.parse(readFileSync(file, "utf8"));
+  assert.deepEqual(saved.read, { "o/r#1": 7 }, "the PR inbox position is kept");
+  assert.equal(saved.pr, 1);
+  assert.ok(saved.plans?.[`o/r#${n}`]?.joinedAt, JSON.stringify(saved));
 });

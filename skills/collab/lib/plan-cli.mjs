@@ -127,6 +127,15 @@ function commitPlan(ctx, build) {
   return res;
 }
 
+// The agent's file under COLLAB_HOME may also hold a PR collab's inbox cursor (the same id can be
+// in both): add the plan to it, never replace what it holds.
+function noteAgent(ctx, agent, tool) {
+  const file = id.loadAgentFile(agent);
+  if (!file) return; // unreadable right now: writing would drop what it holds
+  const key = `${String(ctx.repo).toLowerCase()}#${ctx.n}`;
+  id.saveAgentFile(agent, { ...file, tool: file.tool ?? tool, plans: { ...(file.plans ?? {}), [key]: { joinedAt: iso() } } });
+}
+
 function requirePlanAgent(ctx) {
   if (!ctx.agent) throw new CollabError(EXIT.PRECONDITION, "pass --agent <your id> (printed by `collab plan new` or `collab plan join`)");
   const a = ctx.ledger.agents?.[ctx.agent];
@@ -508,7 +517,7 @@ async function newCmd(ctx) {
     throw e;
   }
   G.ensureExclude(ctx.root, ".collab/");
-  id.saveAgentFile(agent, { plan: ctx.n, repo: ctx.repo, tool, joinedAt: iso() });
+  noteAgent(ctx, agent, tool);
   publish(ctx);
   const url = issueUrl(ctx);
   ctx.say([
@@ -585,7 +594,7 @@ async function join(ctx) {
     return [pev(ctx, "plan.join", { tool, host: hostname() })];
   });
   G.ensureExclude(ctx.root, ".collab/");
-  id.saveAgentFile(agent, { plan: ctx.n, repo: ctx.repo, tool, joinedAt: iso() });
+  noteAgent(ctx, agent, tool);
   if (arriving) {
     // Commenting from their own account also subscribes the person to the issue's notifications.
     try {
@@ -889,6 +898,7 @@ async function wait(ctx) {
 async function status(ctx) {
   ctx.n = issueNo(ctx);
   loadPlan(ctx);
+  housekeeping(ctx); // else it shows who agreed as of the last write, missing browser /collab agree comments
   const l = ctx.ledger;
   const rows = PL.activePeople(l).map((login) => {
     const a = l.agreements?.[login];
