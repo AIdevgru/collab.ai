@@ -7,12 +7,13 @@
 //   2. merge   my approved task (not while the main PR's CI is red, except a fix-ci task)
 //   3. review  a review I already hold
 //   4. work    my claimed task: push, verify, submit
-//   5. review  another vendor's task waiting for a reviewer
+//   5. review  a task waiting for a reviewer: another vendor's first; one of my own vendor's
+//              once no agent from another vendor is around, or after reviewWaitMin
 //   6. claim   the first claimable open task (fix-ci tasks first, then id order)
 //   7. merge / reclaim  a stale task: merge it if approved and green, otherwise steal it
 //   8. done or wait
 
-import { derive, isTerminal, taskIds, unmetDeps } from "./ledger.mjs";
+import { ciAt, ciMode, derive, isTerminal, reviewTurn, taskIds, touchesWorkflows, unmetDeps, verified } from "./ledger.mjs";
 import { intersect } from "./glob.mjs";
 
 const IN_FLIGHT = new Set(["claimed", "changes_requested", "in_review", "approved"]);
@@ -46,24 +47,35 @@ function subOf(lv, id, t) {
   return { ci: ciOf(s.ci), mergeable: s.mergeable ?? "UNKNOWN" };
 }
 
-const passingVerify = (t, sha) => !!sha && (t.verify ?? []).some((v) => v.ok === true && v.sha === sha);
+// CI's summary is written by whichever agent read it: quoted, so it can't pass for collab's words.
+const quoted = (v) => `"${String(v ?? "").replace(/\s+/g, " ").replace(/"/g, "'").slice(0, 300)}"`;
 const latest = (t, verdict) => (t.reviews ?? []).filter((r) => r.verdict === verdict).at(-1) ?? null;
 
-// The next command in the push -> verify -> submit chain for a task I own.
-function chain(t, id, c) {
+// The next command in the push -> verify -> submit chain for a task I own. With CI running the
+// tests, a task is submitted as soon as its CI runs: the review goes on alongside it.
+function chain(L, t, id, c) {
   if (!t.headSha) return c("push", id);
-  if (!passingVerify(t, t.headSha)) return c("verify", id);
-  return c("submit", id);
+  if (verified(L, t)) return c("submit", id);
+  return ciMode(L) && ciAt(t)?.state === "running" ? c("submit", id) : c("verify", id);
 }
 
-function mergeable(t, sub, frozen) {
+// With the tests on CI: CI failed at the head. Tests missing: nothing has verified the head, and
+// nothing runs them there yet. With the tests on CI that is a task with no CI at its head; on the
+// machines it is an approved task (approved before the owner moved the tests back from CI, or
+// waived after a push), since in review its reviewer runs them.
+const ciFailed = (L, t) => ciMode(L) && ciAt(t)?.state === "failed" && !verified(L, t);
+const testsMissing = (L, t) => !!t.headSha && !verified(L, t)
+  && (ciMode(L) ? !ciAt(t) : t.status === "approved");
+
+function mergeable(L, t, sub, frozen) {
   if (t.status !== "approved" || t.blocked) return false;
   if (latest(t, "approve")?.sha !== t.headSha) return false;
   if (frozen && t.kind !== "fix-ci") return false;
   if (sub.mergeable === "CONFLICTING") return false;
-  if (sub.ci === "SUCCESS") return true;
-  // No checks, or no way to tell: only a passing collab verify at the head counts.
-  return (sub.ci === "NONE" || sub.ci === "UNKNOWN") && passingVerify(t, t.headSha);
+  // The tests have to have passed at the head (on CI, or with collab verify on a machine),
+  // whatever other checks the sub-PR shows.
+  if (!verified(L, t)) return false;
+  return sub.ci === "SUCCESS" || sub.ci === "NONE" || sub.ci === "UNKNOWN";
 }
 
 export function nextAction(ledger, me, live, now, { files = [] } = {}) {
@@ -93,8 +105,6 @@ export function nextAction(ledger, me, live, now, { files = [] } = {}) {
   const lv = readLive(live);
   const frozen = lv.mainCi === "FAILURE";
   const ids = taskIds(L);
-  const myVendor = L.agents[me].vendor;
-  const vendorOf = (agent) => L.agents[agent]?.vendor;
   const mine = ids.filter((id) => T[id].owner === me && !isTerminal(T[id].status) && !T[id].blocked);
 
   // 1. Fix my own tasks.
@@ -105,12 +115,18 @@ export function nextAction(ledger, me, live, now, { files = [] } = {}) {
     if (sub.mergeable === "CONFLICTING") {
       return say("fix", id, `${id}'s ${pr} conflicts with ${L.pr?.headRef ?? "the PR head"}: run this, resolve the conflicts, then collab push ${id}`, c("sync", id));
     }
-    if (sub.ci === "FAILURE") {
+    // The CI collab started says more (which workflow, its link, how to rerun) than the sub-PR's
+    // checks, which include those same runs; and while it runs again, an older failure there is moot.
+    const ci = ciMode(L) ? ciAt(t) : null;
+    if (ciFailed(L, t)) {
+      return say("fix", id, `CI failed on ${id} at ${short(t.headSha)}: ${quoted(ci.summary)}. Fix it, then run this (if it is only flaky, collab verify ${id} runs it again)`, c("push", id));
+    }
+    if (sub.ci === "FAILURE" && ci?.state !== "running") {
       return say("fix", id, `CI is failing on ${id}'s ${pr} at ${short(t.headSha)}: fix it, then run this`, c("push", id));
     }
     if (t.status === "changes_requested") {
       const asked = latest(t, "changes");
-      const cmd = asked && asked.sha === t.headSha ? c("push", id) : chain(t, id, c);
+      const cmd = asked && asked.sha === t.headSha ? c("push", id) : chain(L, t, id, c);
       return say("fix", id, `the reviewer requested changes on ${id}: address them, then collab push / verify / submit`, cmd);
     }
   }
@@ -118,41 +134,49 @@ export function nextAction(ledger, me, live, now, { files = [] } = {}) {
   // 2. Merge my approved tasks.
   for (const id of mine) {
     const t = T[id];
-    if (mergeable(t, subOf(lv, id, t), frozen)) return say("merge", id, `${id} is approved at ${short(t.headSha)} and green: merge it`, c("merge", id));
+    if (mergeable(L, t, subOf(lv, id, t), frozen)) return say("merge", id, `${id} is approved at ${short(t.headSha)} and green: merge it`, c("merge", id));
   }
 
   // 3. Finish a review I already hold.
   for (const id of ids) {
     const t = T[id];
-    if (t.status !== "in_review" || t.reviewer !== me || t.blocked || vendorOf(t.owner) === myVendor) continue;
+    if (t.status !== "in_review" || t.reviewer !== me || t.blocked) continue;
     if (t.reviewSha && t.reviewSha !== t.headSha) {
       return say("review", id, `${t.owner} pushed ${short(t.headSha)} while you were reviewing ${id} at ${short(t.reviewSha)}: run this to check out the new commit, then review it`, c("review-claim", id));
+    }
+    if (ciFailed(L, t)) {
+      return say("review", id, `CI failed on ${id} at ${short(t.headSha)} (${quoted(ciAt(t).summary)}): write review.md with that and anything else you found, then run this so ${t.owner} fixes it`, c("review", id, "--changes", "--body-file", "review.md"));
     }
     return say("review", id, `you are reviewing ${id} at ${short(t.headSha)}: read the diff, write review.md, then run this (or swap --approve for --changes)`, c("review", id, "--approve", "--body-file", "review.md"));
   }
 
-  // 4. Keep working on my claimed task.
+  // 4. Keep working on my claimed task. A task of mine in review or approved whose tests have not
+  // run at its head (I pushed after submitting, the owner waived the review, or the owner moved the
+  // tests) gets them run: nobody can merge it until they pass there.
   for (const id of mine) {
-    if (T[id].status === "claimed") return say("work", id, `keep working on ${id}, then collab push / verify / submit`, chain(T[id], id, c));
+    if (T[id].status === "claimed") return say("work", id, `keep working on ${id}, then collab push / verify / submit`, chain(L, T[id], id, c));
+    const t = T[id];
+    if ((t.status === "in_review" || t.status === "approved") && testsMissing(L, t)) {
+      const missing = !ciMode(L) ? "its tests have not passed on that commit: run them"
+        : touchesWorkflows(t).length ? "its tests have not run on that commit (it changes a workflow, so they run on this machine): run them"
+          : "no CI has run on that commit: start it";
+      return say("work", id, `${id} is ${t.status === "approved" ? "approved" : "in review"} at ${short(t.headSha)}, and ${missing}`, c("verify", id));
+    }
   }
 
-  // 5. Review another vendor's task.
-  for (const id of ids) {
-    const t = T[id];
-    if (t.status !== "in_review" || t.owner === me || t.blocked) continue;
-    if (!d.tasks[id].eligibleReviewers.includes(me) || !d.tasks[id].waitingReview) continue;
-    return say("review", id, `${id} by ${t.owner} waits for a review from another vendor: claim it`, c("review-claim", id));
+  // 5. Review a task: another vendor's first, then one of my own vendor's that is open to me.
+  for (const turn of ["preferred", "open"]) {
+    const id = ids.find((k) => reviewTurn(L, d, k, me) === turn);
+    if (!id) continue;
+    const why = turn === "preferred" ? `${id} by ${T[id].owner} waits for a review, and you are from another vendor: claim it`
+      : `${id} by ${T[id].owner} waits for a review${d.tasks[id].preferredReviewers.length ? ", and no agent from another vendor has taken it" : ""}: claim it`;
+    return say("review", id, why, c("review-claim", id));
   }
 
   // 6. Claim a task.
   const held = ids.filter((id) => T[id].owner === me && WIP_STATUSES.has(T[id].status)).length;
   const wipFree = held < (L.config?.wip ?? 1);
-  // Same rule as `collab claim`: my own in-flight tasks never block me.
-  const inFlight = ids.filter((id) => IN_FLIGHT.has(T[id].status) && T[id].owner !== me);
-  const overlaps = (id) => inFlight.some((o) => o !== id && intersect(T[id].scope ?? [], [], T[o].scope ?? [], T[o].touched ?? [], files).length > 0);
-  const depsDone = (t) => unmetDeps(L, t).length === 0;
-  const open = ids.filter((id) => T[id].status === "open" && !T[id].blocked && depsDone(T[id]) && !reservedForOther(T[id], me, now));
-  const claimable = open.filter((id) => !overlaps(id));
+  const { open, claimable } = claimableTasks(L, me, now, { files });
   if (wipFree && claimable.length) {
     const id = claimable.find((k) => T[k].reserved?.agent === me) ?? claimable.find((k) => T[k].kind === "fix-ci") ?? claimable[0];
     const why = T[id].reserved?.agent === me ? `the owner reserved ${id} for you: claim it`
@@ -166,9 +190,10 @@ export function nextAction(ledger, me, live, now, { files = [] } = {}) {
     if (!d.tasks[id].stale || t.owner === me || t.blocked) continue;
     const sub = subOf(lv, id, t);
     if (t.status === "approved") {
-      if (mergeable(t, sub, frozen)) return say("merge", id, `${id} is approved and green, but ${t.owner}'s lease expired: merge it`, c("merge", id));
-      // Stealing clears the approval, so only do it when the task needs a fix.
-      if (sub.ci !== "FAILURE" && sub.mergeable !== "CONFLICTING") continue;
+      if (mergeable(L, t, sub, frozen)) return say("merge", id, `${id} is approved and green, but ${t.owner}'s lease expired: merge it`, c("merge", id));
+      // Stealing clears the approval, so only do it when the task needs a fix, or tests only its
+      // owner could start.
+      if (sub.ci !== "FAILURE" && sub.mergeable !== "CONFLICTING" && !ciFailed(L, t) && !testsMissing(L, t)) continue;
     }
     if (wipFree) return say("reclaim", id, `${t.owner}'s lease on ${id} expired at ${t.leaseUntil}: take it over`, c("claim", id, "--steal"));
   }
@@ -183,6 +208,20 @@ export function nextAction(ledger, me, live, now, { files = [] } = {}) {
   return say("wait", null, waitReason(L, me, ids, d, frozen, open, claimable, wipFree, now), c(...WAIT));
 }
 
+// The open tasks `me` could claim now. `open`: not blocked, dependencies done, not reserved for
+// another agent. `claimable`: of those, the ones whose scope overlaps no other agent's work in
+// flight (the rule `collab claim` applies: my own in-flight tasks never block me). In id order.
+// With `me` null, it is the view of an agent that hasn't joined yet (collab invite --sessions):
+// every reservation and every task in flight counts.
+export function claimableTasks(ledger, me, now, { files = [] } = {}) {
+  const T = ledger.tasks ?? {};
+  const ids = taskIds(ledger);
+  const inFlight = ids.filter((id) => IN_FLIGHT.has(T[id].status) && (me === null || T[id].owner !== me));
+  const overlaps = (id) => inFlight.some((o) => o !== id && intersect(T[id].scope ?? [], [], T[o].scope ?? [], T[o].touched ?? [], files).length > 0);
+  const open = ids.filter((id) => T[id].status === "open" && !T[id].blocked && unmetDeps(ledger, T[id]).length === 0 && !reservedForOther(T[id], me, now));
+  return { open, claimable: open.filter((id) => !overlaps(id)) };
+}
+
 // An open task the owner set aside for another agent they invited (collab invite --task).
 function reservedForOther(t, me, now) {
   const r = t.reserved;
@@ -195,9 +234,10 @@ function waitReason(L, me, ids, d, frozen, open, claimable, wipFree, now) {
   const mine = ids.filter((id) => T[id].owner === me && !isTerminal(T[id].status));
   for (const id of mine) {
     const t = T[id];
+    const ciRuns = ciMode(L) && ciAt(t)?.state === "running" ? ` (its CI is running at ${short(t.headSha)})` : "";
     if (t.blocked) parts.push(`${id} is blocked: ${t.blocked.reason}`);
-    else if (t.status === "in_review") parts.push(d.tasks[id].eligibleReviewers.length ? `${id} waits for a review` : `${id} needs a reviewer from another vendor to join`);
-    else if (t.status === "approved") parts.push(frozen && t.kind !== "fix-ci" ? `${id} is approved, but merges are frozen while the main PR's CI is red` : `${id} is approved and waits for green CI`);
+    else if (t.status === "in_review") parts.push((d.tasks[id].eligibleReviewers.length ? `${id} waits for a review` : `${id} needs a reviewer: another agent has to join`) + ciRuns);
+    else if (t.status === "approved") parts.push(frozen && t.kind !== "fix-ci" ? `${id} is approved, but merges are frozen while the main PR's CI is red` : `${id} is approved and waits for green CI${ciRuns}`);
   }
   if (!wipFree && open.length) parts.push("you are at the WIP limit");
   else if (open.length > claimable.length) parts.push(`${open.length - claimable.length} open task(s) overlap work in flight`);
@@ -205,6 +245,9 @@ function waitReason(L, me, ids, d, frozen, open, claimable, wipFree, now) {
   if (waitingDeps.length) parts.push(`${waitingDeps.join(", ")} wait on dependencies`);
   const reserved = ids.filter((id) => T[id].status === "open" && reservedForOther(T[id], me, now));
   if (reserved.length) parts.push(reserved.map((id) => `${id} is reserved for ${T[id].reserved.agent}`).join(", "));
+  // Reviews another vendor gets first: say when they open to me, so the wait isn't a mystery.
+  const held = ids.filter((id) => d.tasks[id].eligibleReviewers.includes(me) && d.tasks[id].waitingReview && !d.tasks[id].reviewOpen && !T[id].blocked);
+  if (held.length) parts.push(held.map((id) => `${id}'s review goes to an agent from another vendor first, until ${d.tasks[id].reviewOpenAt}`).join(", "));
   const others = ids.filter((id) => T[id].owner && T[id].owner !== me && IN_FLIGHT.has(T[id].status));
   if (others.length) parts.push(`${others.length} task(s) in flight with other agents`);
   return `nothing to do right now${parts.length ? ": " + parts.join("; ") : ""}`;

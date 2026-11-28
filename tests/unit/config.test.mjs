@@ -168,6 +168,28 @@ test("passEnv: a list of variable names from the default branch's .collab.json, 
   assert.equal(loadRepoConfig("/repo", "main", io({})).passEnv, undefined);
 });
 
+test("verify: \"ci\" with ciWorkflows from the default branch; without them it stays local, with a warning", () => {
+  const io = (json) => ({ showFile: (cwd, ref, p) => (p === ".collab.json" ? JSON.stringify(json) : null), lsFiles: () => [] });
+  assert.equal(loadRepoConfig("/repo", "main", io({})).verify, "local");
+  assert.equal(loadRepoConfig("/repo", "main", io({})).ciWorkflows, undefined);
+  const ci = loadRepoConfig("/repo", "main", io({ verify: "ci", ciWorkflows: ["ci.yml", "e2e.yaml", "ci.yml"] }));
+  assert.equal(ci.verify, "ci");
+  assert.deepEqual(ci.ciWorkflows, ["ci.yml", "e2e.yaml"]);
+  assert.deepEqual(ci.warnings, []);
+  const none = loadRepoConfig("/repo", "main", io({ verify: "ci" }));
+  assert.equal(none.verify, "local");
+  assert.ok(none.warnings.some((w) => /"verify": "ci" needs "ciWorkflows".*verifying locally instead/.test(w)), none.warnings.join("\n"));
+  for (const bad of ["ci.yml", [], ["../x.yml"], ["ci"], [3]]) {
+    const cfg = loadRepoConfig("/repo", "main", io({ verify: "ci", ciWorkflows: bad }));
+    assert.equal(cfg.ciWorkflows, undefined, JSON.stringify(bad));
+    assert.equal(cfg.verify, "local");
+    assert.ok(cfg.warnings.some((w) => /"ciWorkflows" must be a list of workflow file names/.test(w)), JSON.stringify(bad));
+  }
+  const odd = loadRepoConfig("/repo", "main", io({ verify: "cloud" }));
+  assert.equal(odd.verify, "local");
+  assert.ok(odd.warnings.some((w) => /"verify" must be "local" or "ci"; using the default "local"/.test(w)), odd.warnings.join("\n"));
+});
+
 test("commandEnv removes variables that look like secrets, except the ones in passEnv", async () => {
   const { commandEnv } = await import("../../skills/collab/lib/cli.mjs");
   const env = {

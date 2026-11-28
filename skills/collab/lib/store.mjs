@@ -248,10 +248,25 @@ export function list({ cwd, agent, auth, kind = "pr" }) {
 // Events from the cached ref's commit trailers, newest first. Call read() first to refresh.
 export function history({ cwd, pr, agent, limit = 10, kind = "pr" }) {
   checkKind(kind);
-  const cacheRef = checkedCacheRef(agent, pr, kind);
+  return logEvents(cwd, checkedCacheRef(agent, pr, kind), limit).slice(0, limit);
+}
+
+// Events with seq above afterSeq from the cached ref, oldest first: what an agent has not read yet.
+// Local only, like history(). At most `limit` commits back are searched, so a reader that fell far
+// behind gets the newest part.
+export function eventsSince({ cwd, pr, agent, afterSeq = 0, limit = 200, kind = "pr" }) {
+  checkKind(kind);
+  const after = Number(afterSeq) || 0;
+  return logEvents(cwd, checkedCacheRef(agent, pr, kind), limit)
+    .filter((h) => Number(h.event?.seq) > after)
+    .reverse();
+}
+
+// { sha, at, event } for the events in the last `commits` commits of a ref, newest first.
+function logEvents(cwd, cacheRef, commits) {
   const head = git(["rev-parse", "--verify", "--quiet", `${cacheRef}^{commit}`], { cwd, allowFail: true });
   if (head.code !== 0) return [];
-  const log = git(["log", head.stdout.trim(), "-n", String(limit), "--format=%H%x1f%cI%x1f%B%x1e"], { cwd }).stdout;
+  const log = git(["log", head.stdout.trim(), "-n", String(commits), "--format=%H%x1f%cI%x1f%B%x1e"], { cwd }).stdout;
   const result = [];
   for (const record of log.split("\x1e")) {
     const [sha, date, body] = record.replace(/^\s+/, "").split("\x1f");
@@ -269,7 +284,7 @@ export function history({ cwd, pr, agent, limit = 10, kind = "pr" }) {
     // Events in one commit were applied in order, so the last one is the newest.
     for (const event of events.reverse()) result.push({ sha, at, event });
   }
-  return result.slice(0, limit);
+  return result;
 }
 
 // Deletes the ledger on origin and this clone's cached copies of it.

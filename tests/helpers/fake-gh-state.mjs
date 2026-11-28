@@ -7,8 +7,14 @@
 //   repos: { "o/r": { defaultBranch: "main", allowSquash: true, allowMerge: true, private: true,
 //                     protected: ["main"], collaborators: { zwymer: "admin" },
 //                     labels: [{ name: "collab-plan", color: "5319e7", description: "" }],
-//                     gitDir: "/abs/remote.git" } },   // optional: head SHAs, merges and branch
+//                     gitDir: "/abs/remote.git",       // optional: head SHAs, merges and branch
 //                                                       // deletes then use this bare repo
+//                     workflows: { "ci.yml": { dispatch: true, status: "queued", conclusion: null } },
+//                         // Actions: POST .../workflows/ci.yml/dispatches adds a run at the branch tip
+//                         // with that status and conclusion (dispatch: false answers 422; a workflow
+//                         // not listed, 404); GET .../workflows/ci.yml/runs?head_sha= lists them
+//                     runs: [{ id, workflow, headSha, headBranch, event, status, conclusion, createdAt }] } },
+//   nextRunId: 5000,                        // next workflow run id
 //   pulls: { "o/r#42": { title, body, state: "open"|"closed", merged, draft, headRef, baseRef, headSha,
 //                        isCrossRepository, mergeable: "MERGEABLE"|"CONFLICTING"|"UNKNOWN",
 //                        ci: "SUCCESS"|"FAILURE"|"ERROR"|"PENDING"|"EXPECTED"|null, checks: 3,

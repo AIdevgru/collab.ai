@@ -21,3 +21,4 @@ Zach wants to settle how SSO login should work before anyone builds it. Alice an
 6. An agent can't act for someone else: Zach's agent id run from Alice's clone is refused, because that agent belongs to `zwymer`.
 7. `#1` is a pull request, so `collab plan join 1` is refused and points to `collab join 1`.
 8. The PR collab's own planner command still works: `collab plan --tasks .collab/plan.json` on PR #1 posts the task split as before.
+9. Alice's agent is also in a PR collab, and its file under `COLLAB_HOME` keeps how far it has read that PR's inbox. When the agent joins the plan session again, collab adds the session to that file and keeps everything else in it, so the inbox doesn't show old items as new.

@@ -40,7 +40,10 @@ Two scopes overlap when their expanded file sets intersect. A glob that matches 
 - **Exports:** `SCHEMA = 1`, `STATUSES`, `PHASES`, `VENDORS = { claude: "anthropic", codex: "openai", gemini: "google", grok: "xai", other: "other" }`.
 - **Constructor:** `newLedger({ pr, config, agent: { id, tool, host, pid }, now })` returns a ledger in `planning`, holding the planner lease, with the agent registered. Here `pr = { repo, number, url, headRef, baseRef, defaultBranch, ghLogin, mergeMethod }`.
 - **Reducer:** `apply(ledger, event)` returns a new ledger. It never mutates its input. It sets `seq = ledger.seq + 1` and throws `CollabError(PRECONDITION)` on an illegal event. `event = { type, agent, task?, data, at }`.
-- **Derived state:** `derive(ledger, now)` returns `{ tasks: { T1: { inProgress, stale, reviewStale, waitingReview, eligibleReviewers[] } }, liveAgents[], nextLeaseExpiry }`.
+- **Derived state:** `derive(ledger, now)` returns `{ tasks: { T1: { inProgress, stale, reviewStale, waitingReview, eligibleReviewers[], preferredReviewers[], reviewOpenAt, reviewOpen } }, liveAgents[], nextLeaseExpiry, nextReviewOpen }`. `eligibleReviewers` is every agent but the owner; `preferredReviewers` those of another vendor. `reviewOpenAt` (null unless the task waits for a reviewer) is when the review opens to the owner's vendor: the submit time plus `reviewWaitMin` while a preferred reviewer is around (seen in the last `ACTIVE_MIN` = 30 minutes, or holding a lease), else at once. `nextReviewOpen` is the earliest one still ahead, for `wait`.
+- `reviewTurn(ledger, d, id, agent, vendor?) -> "preferred" | "open" | null`: whether `agent` may review task `id` now (`agent` null: one of `vendor` that hasn't joined, as a keeper's new session). `review.claim` and `review.verdict` refuse only the owner.
+- `ciMode(ledger)`: `config.verify === "ci"`. `ciAt(task, sha = task.headSha)`: the task's CI record when it is for that commit, else null. `touchesWorkflows(task)`: its touched files under `.github/workflows/` or `.github/actions/`. `verified(ledger, task, sha = task.headSha)`: the tests passed at that commit (a recorded CI failure outweighs any pass with the tests on CI; a pass from CI counts while the CI record says passed). `next`, the dashboard and the CLI all use it.
+- `SCHEMA = 2`, the newest understood; `apply` reads schemas 1 and 2. `newLedger` writes 2 when `config.verify` is `ci`, else 1.
 - **Helpers:** `vendorOf(tool)`, `taskIds(ledger)` (in numeric order), `isTerminal(status)`.
 - **Ledger shape:** exactly as in design.md, section "Ledger", plus: `tasks[T].forSha` and `tasks[T].withdrawn` (fix-ci only), `tasks[T].reviewSha` (the head when the reviewer claimed the review), `tasks[T].overlap` (what a claim with `--allow-overlap` accepted; absent otherwise), `lastCommentAt` (when the comment `lastCommentId` names was written), `tasks[T].decision = { text, by, at }` (set by `task.unblock` with a decision), `merged.mergeSha` (when `task.merge` passes it), and `directives[i].applied` (false when the directive could not act, for example cancelling a done task), `.task` and `.url`. `newLedger` returns `seq: 0, rev: null`.
 - **Refusal order:** schema mismatch → `CollabError(ENV)`; an event with no type or no valid `at` → `CollabError(BUG)`; unknown type or unknown agent (every type but `agent.join`, unless `agent === "owner"`) → `PRECONDITION`; phase `paused` or `closed` → `UNSUPPORTED` except `directive`, `phase.set`, `comments.seen`, `notice.sent`, `agent.seen`, `agent.join`; phase `planning` → `PRECONDITION` except `agent.join`, `agent.seen`, `planner.lease`, `plan`, `directive`, `comments.seen`, `notice.sent`, `phase.set`. Messages name the actor, the task and its status: `codex-7k2p can't claim T3 (in_review): it must be open`. `details = { type, agent, task, status }`.
@@ -61,7 +64,9 @@ Two scopes overlap when their expanded file sets intersect. A glob that matches 
 | `task.release` | | Owner only. Status becomes `open`; owner and lease are cleared. |
 | `task.lease` | `{ leaseUntil }` | Owner only. |
 | `task.push` | `{ headSha, touched, subPr?, leaseUntil? }` | Owner only, in `claimed`, `changes_requested`, `in_review` or `approved`. `touched` replaces the list (sorted, unique). If the status is `approved` and `headSha` differs from the approved SHA, the status goes back to `in_review`. |
-| `task.verify` | `{ sha, ok, summary }` | Owner or reviewer. |
+| `task.verify` | `{ sha, ok, summary }` | Owner or reviewer. With `"verify": "ci"`, only for a task that touches a workflow (its tests run on the machine). |
+| `task.ci` | `{ sha, state: started \| passed \| failed, runs[], summary, since?, recheck? }` | `"verify": "ci"` only. `started`: owner or reviewer, at the head, not while CI runs there, not for a task that touches `.github/workflows/` or `.github/actions/`; `since` is each workflow's newest run id before the start. `passed` / `failed`: anyone, once, while CI runs at the head; `failed` with `recheck: true` also over a recorded pass (merge found GitHub disagreeing). It also adds a verify (`via: "ci"`). The summary is cut to one line of 300 characters, and a run's url kept only on github.com. `submit` accepts CI running at the head in place of a passing verify. |
+| `config.verify` | `{ verify: local \| ci, ciWorkflows? }` | Owner only, also while planning or paused. `ci` needs `ciWorkflows` (given or already set). Raises the schema to 2 for `ci`. |
 | `task.submit` | `{ sha }` | Owner. From `claimed` or `changes_requested`. Requires a passing `verify` with this `sha` and `sha === headSha`. Status becomes `in_review`. |
 | `review.claim` | `{ leaseUntil }` | The task must be `in_review` with no live reviewer. The reviewer's vendor must differ from the owner's vendor, and the reviewer can't be the owner. Sets `reviewSha` to the current `headSha`; the same reviewer claiming again moves it to the new head. |
 | `review.verdict` | `{ verdict: "approve" \| "changes", sha, commentId }` | The current reviewer only, with `sha === headSha`, and `reviewSha === headSha`: after the owner pushes during a review, the reviewer must run `review-claim` again (which checks out the new head) before any verdict. `approve` makes it `approved`; `changes` makes it `changes_requested` and adds one to `changeRounds`. In both cases `reviewer` is cleared. |
@@ -91,11 +96,20 @@ export function nextAction(ledger, me, live, now, { files = [] } = {}) -> {
   2. `merge` my approved task: the approval's SHA is the head; not frozen (`mainCi === "FAILURE"`) unless it's a `fix-ci` task; sub-PR CI `SUCCESS`, or `NONE`/`UNKNOWN` plus a passing verify at the head. Never on `PENDING` or a conflict.
   3. `review` a task whose review I already hold (cmd `review T --approve --body-file review.md`; or `review-claim T` when the owner pushed since I claimed it, so `reviewSha` is no longer the head).
   4. `work` on my `claimed` task: why `keep working on T3, then collab push / verify / submit`; cmd is the next of `push T` (nothing pushed), `verify T` (no passing verify at the head) or `submit T`.
-  5. `review` an `in_review` task by another vendor with no live reviewer (cmd `review-claim T`).
+  5. `review` an `in_review` task with no live reviewer that isn't mine (cmd `review-claim T`): first one whose owner is of another vendor, then one of my vendor whose review is open (`reviewTurn`).
   6. `claim` the first open, unblocked task whose deps are done and whose scope doesn't overlap another agent's in-flight scope or touched files; `fix-ci` tasks first, then id order. Only below the WIP limit.
   7. A stale task of someone else's: `merge` it if it is approved and mergeable as in 2; otherwise `reclaim` (`claim T --steal`), but an approved task is stolen only when its CI is red or it conflicts, since stealing clears the approval.
   8. `done` when every task is `done` or `cancelled`; otherwise `wait` (cmd `wait --timeout 9m`) with a reason.
 - Task commands take the task id as a positional argument: `push T3`, `verify T3`, `submit T3`, `sync T3`, `claim T3 [--steal]`, `review-claim T3`, `review T3 …`, `merge T3`. `join` gets the PR URL. `plan` uses `--tasks tasks.json`, a file the planner writes.
+- `claimableTasks(ledger, me, now, { files }) -> { open, claimable }`: the open tasks `me` could claim now (step 6's rule), in id order. `open` = not blocked, dependencies done, not reserved for another agent; `claimable` = of those, no overlap with another agent's work in flight. With `me` null it is the view of an agent that hasn't joined yet: every reservation and every task in flight counts.
+
+## sessions.mjs (pure; see design.md "Parallel sessions")
+```js
+export function sessionPlan(ledger, { target, members, host, now, files }) -> { stop: null|"done"|"closed", start: [{ task: "T3"|null, steal }], why, work, free }
+```
+- `ledger` may be null (no collab yet). `members` are the ids of the keeper's sessions whose process runs; `host` is the agent given with `--agent`, counted only once it has joined.
+- No ledger: one session (task null) unless one runs. Planning: nothing while the planner's lease lasts; a lapsed lease gets one session unless a member runs or the planner is the host. Closed: `stop: "closed"`. Paused: nothing. Every task terminal: `stop: "done"`.
+- Active: `work` = `claimableTasks(ledger, null)` (fix-ci first, then id order) minus any that overlaps a live-reserved open task or one picked before it, then claimed or changes-requested tasks whose lease ran out, unblocked, and not owned by a member or the host (`steal: true`). `free` = the sum over members and host of `wip` minus the WIP tasks they hold, 0 for one with a live reservation; the host only while `lastSeen` is within `HOST_GONE_MIN` (30) or it holds a live WIP lease. `start` = `work.slice(free, free + min(target - members, work - free))`.
 
 ## git.mjs
 ```js
@@ -140,6 +154,8 @@ export function write({ cwd, pr, agent, auth, mutate, maxTries = 6 }) -> { ledge
 export function history({ cwd, pr, agent, limit = 10 }) -> [{ sha, at, event }]
    // newest first (events within one commit reversed), from Collab-Event trailers on the CACHE ref (read() first to refresh);
    // at = commit time as ISO Z; at most `limit` events; [] when the cache ref is missing
+export function eventsSince({ cwd, pr, agent, afterSeq = 0, limit = 200 }) -> [{ sha, at, event }]
+   // the events with seq > afterSeq, OLDEST first, from the same cache ref (no network); searches the last `limit` commits
 export function remove({ cwd, pr, auth })        // git push origin :<ref> (already gone is fine), then deletes this clone's refs/collab-cache/*/pr-<n>
 export function commitMessage(events, agent) -> string ; classifyPush({ code, stdout, stderr }, ref) -> "ok"|"race"|"network"|"error"   // exported for tests
 ```
@@ -157,6 +173,8 @@ export function pinnedToken(login) -> string     // `gh auth token --user <login
 export function activeLogin() -> string          // `gh api user --jq .login` (no GH_TOKEN)
 export function collabHome(env = process.env) -> string   // COLLAB_HOME or ~/.collab
 export function saveAgentFile(id, data) -> boolean   // best effort: <collabHome>/agents/<id>.json; false on failure; never throws
+export function readAgentFile(id) -> object          // what saveAgentFile wrote, or {}; never throws. cli.mjs keeps the inbox cursor here: read["<repo>#<pr>"] = seq
+export function loadAgentFile(id) -> object | null   // the same, but null when the file is there and can't be read: a caller that rewrites the file must not save less than it held
 export function requireOwner(env = process.env)  // CollabError(PRECONDITION, "owner-only command; run it in your own terminal") if isAgentEnv
 ```
 
@@ -178,12 +196,15 @@ export function liveSnapshot(repo, mainN, subs /* {T3: 59} */, { auth }) -> {
    // one batched GraphQL query with aliases (main, s_T3); a sub-PR GitHub can't find is left out of subs
    // ok:false (never throws) -> { ok:false, error, main:null, mainCi:"UNKNOWN", mainMergeable:"UNKNOWN", subs:{} }
 export function createPr(repo, { base, head, title, body, draft }, { auth }) -> { number, url }
+export function dispatchWorkflow(repo, workflow, ref, { auth }) -> void   // workflow_dispatch on branch ref; 404 and 422 become exit-2 errors that say what to fix
+export function workflowRuns(repo, workflow, sha, { auth }) -> [{ id, url, status, conclusion, event, createdAt, sha }]   // newest first
 export function markReady(repo, n, { auth })               // REST node_id, then GraphQL markPullRequestReadyForReview; no-op if not a draft
 export function setBody(repo, n, body, { auth })
 export function comment(repo, n, body, { auth }) -> { id, url }
 export function editComment(repo, id, body, { auth })
 export function newestComment(repo, { auth }) -> { id, createdAt } | null   // the repo's newest issue/PR comment; ids grow across a repo
 export function commentsSince(repo, n, sinceId, { auth, sinceAt }) -> [{ id, login, body, createdAt, url }]   // issue comments with id > sinceId, oldest first; sinceAt (ISO) is sent as GitHub's `since` so older comments aren't downloaded
+export function repoCommentsSince(repo, sinceId, { auth, sinceAt }) -> [{ id, pr, login, body, createdAt, url }]   // every issue/PR comment in the repo with id > sinceId, oldest first; pr from issue_url; one request for the main PR and all sub-PRs. Always pass sinceAt
 export function permission(repo, login, { auth }) -> "admin"|"maintain"|"write"|"triage"|"read"|"none"
    // REST .permission (GitHub folds maintain into write, triage into read); 404 -> "none"; cached per process (repo+login, case-insensitive)
 export function clearPermissionCache()                     // tests only
@@ -206,13 +227,19 @@ export function splice(body, block, seq, at) -> string | null   // null when exi
    // only text between the markers changes; the owner's text stays byte-for-byte (CRLF kept; the block uses the body's line ending)
    // a start marker with no end marker counts as absent; a block containing collab markers throws (bug)
 export function ciFilteredToDefault(cwd, defaultBranch) -> boolean   // scans .github/workflows/*.yml|yaml at origin/<default> (git.lsFiles/showFile)
+export function ciWorkflowProblems(cwd, defaultBranch, workflows) -> string[]   // listed workflows origin/<default> lacks, or that have no workflow_dispatch trigger
+export function hasDispatchTrigger(yamlText) -> boolean   // pure, line-based
+export function dispatchableWorkflows(cwd, defaultBranch) -> string[]   // workflow file names at origin/<default> with a workflow_dispatch trigger
+export function pullRequestWorkflows(cwd, defaultBranch, workflows) -> string[]   // the ones of these that also run on pull requests (safe to name from an agent's session)
+export function hasPullRequestTrigger(yamlText) -> boolean   // pure, line-based; pull_request_target doesn't count
 export function workflowFiltersToDefault(yamlText, defaultBranch) -> boolean   // pure, line-based: every pull_request(_target) trigger has branches == [default]
 ```
 - `checkSupported` messages say what to do next (push the branch here, reopen, open a new PR, use a feature branch). `details.reason` is `fork`, `merged`, `closed` or `default-head`. It accepts `state` in either case.
 
 ## config.mjs
 ```js
-export const DEFAULTS = { leaseMin: 90, reviewLeaseMin: 60, planLeaseMin: 15, reviewAlertH: 2, maxTasks: 12, wip: 1, worktreeRoot: ".collab/wt" };
+export const DEFAULTS = { leaseMin: 90, reviewLeaseMin: 60, planLeaseMin: 15, reviewAlertH: 2, reviewWaitMin: 10, maxTasks: 12, wip: 1, worktreeRoot: ".collab/wt", verify: "local" };
+   // verify: "local" | "ci". "ci" needs ciWorkflows (workflow file names, such as ["ci.yml"]); without them it falls back to "local" with a warning
 export function loadRepoConfig(cwd, defaultBranch, io = { showFile, lsFiles }) -> { ...DEFAULTS, verifyCmd, setupCmd, warnings[] }
    // .collab.json at origin/<default> (git.showFile), merged over DEFAULTS; io is injectable for tests
    // keys outside DEFAULTS (apart from verifyCmd/setupCmd), or of the wrong type, are ignored with a line in warnings[]
@@ -241,9 +268,29 @@ export function lint(markdown) -> string[]   // a11y problems; [] when clean
 - Recent activity leaves out `agent.seen`, `comments.seen`, `notice.sent` and `task.lease`. Over 10,000 characters, the Tasks and Agents tables fold into `<details>` and the activity list is dropped.
 - Golden files live in `tests/fixtures/dashboard/` (built by `build.mjs` through `newLedger` and `apply`); `UPDATE_GOLDEN=1` regenerates them.
 
+## inbox.mjs (pure; see design.md "Comms and polling")
+```js
+export function inboxFor(ledger, me, events) -> { urgent: item[], activity: item[] }   // events: unread ledger events, oldest first (store.eventsSince(...).map(h => h.event))
+   // item = { seq, at, from, kind, task, text } (+ to for a message; pr, url for a comment)
+   // kind: message | comment | note | block | decision | review | cancel | owner (urgent), activity
+   // me's own events and bookkeeping are left out; malformed events are skipped
+export function render({ urgent, activity, more }) -> string   // "" when both are empty; heading says the text is untrusted data
+   // multi-line bodies are indented under their item; activity is one line per entry with free text in quotes; control, line-separator, invisible and direction characters are removed
+export const SHOWN_URGENT = 20   // urgent items one block shows; cli.mjs marks read only up to the last one shown
+export function label(item) -> string                    // "message from codex-7k2p", for the line `collab wait` prints when it wakes
+```
+
+## poll.mjs (pure; see design.md "Comms and polling")
+```js
+export function plan({ sinceChangeMs, untilGithubMs, untilExpiryMs, soloAgent, rand }) -> { sleepMs }
+   // sleepMs: clamp(sinceChangeMs / 2, 5 s, 60 s) (60 s when soloAgent), jittered +-20%, cut short by the GitHub deadline and the next lease expiry, never under 1 s
+export function githubEvery({ sinceChangeMs, waitingOnCi }) -> ms    // 30 s when waitingOnCi, else clamp(sinceChangeMs / 2, 60 s, 180 s)
+   // the caller fixes the GitHub deadline (now + githubEvery) each time it reads GitHub; a deadline recomputed every tick would move away as the sleep ends
+```
+
 ## relay.mjs (see design.md "Sandboxed agents: relay")
 ```js
-export const RELAY_ALLOW = ["join","context","plan","prompt","next","wait","status","claim","push","sync","verify","submit","release","review-claim","review","diff","merge","add","cancel","note","block","unblock","dashboard"];
+export const RELAY_ALLOW = ["join","context","plan","prompt","next","wait","status","claim","push","sync","verify","submit","release","review-claim","review","diff","merge","add","cancel","note","block","unblock","dashboard","msg","inbox"];
 export function relayDir(repoRoot) -> `${repoRoot}/.collab/relay`
 export function isSandboxed(cwd, env) -> boolean           // COLLAB_RELAY=1, or the write probe in the git common dir fails with EPERM/EACCES
 export async function request(repoRoot, { argv, agent, cwd, timeoutMs }) -> { code, stdout, stderr }   // client
@@ -254,10 +301,13 @@ export async function serve(repoRoot, { fixedAgent, runCollab, signal })   // re
 ## agents.mjs (invite, stop, doctor; see design.md "Merge-to-main protection for invited agents")
 ```js
 export function claudeAllowed(launcher), CLAUDE_DENIED, launcherPath(env)   // the invited Claude may run only the launcher (absolute path), read-only git and file tools
-export function startupPrompt({ url, number, tool, agent, task, review }) -> string   // join-prompt.md + id, task, stop rule
+export function startupPrompt({ url, number, tool, agent, task, steal, review, sessions }) -> string   // join-prompt.md + id, task (claim, or take over with --steal), parallel-sessions line, stop rule
 export function launchSpec(tool, { root, runDir, agent, model, env }) -> { cmd, args, cwd, env, relay }   // pure; COLLAB_CLAUDE / COLLAB_CODEX JSON argv override the binary
-export async function invite({ tool, root, repo, pr, url, agent, model, task, review, timeoutMs, env }) -> run   // detached agent (+ relay for codex) + watchdog; writes ~/.collab/runs/<id>/run.json
-export function listRuns(env) -> run[]  ·  killRun(run, reason) -> pids  ·  markStopped(run, reason, pids) -> run  ·  stopRun = both  ·  killTree(pid)  ·  isAlive(pid)
+export async function invite({ tool, root, repo, pr, url, agent, model, task, steal, review, timeoutMs, keeper, sessions, env }) -> run   // detached agent (+ relay for codex) + watchdog; writes ~/.collab/runs/<id>/run.json (with keeper and task when a session keeper started it)
+export function listRuns(env) -> run[]  ·  killRun(run, reason) -> pids  ·  markStopped(run, reason, pids) -> run (merged into the file as it is now)  ·  stopRun = both  ·  killTree(pid)  ·  isAlive(pid)
+export function newKeeperRun({ root, repo, pr, tool, target, host, model, timeoutMs, env }) -> run   // ~/.collab/runs/sessions-<k>/run.json, kind "sessions", no process yet
+export function spawnKeeper(run, env) -> run   // detached `collab keep-sessions --run <id> --pr N` in the repo root, without agent markers
+export function isKeeper(run)  ·  keeperId()  ·  readRun(id, env) -> run | null  ·  updateRun(run, patch) -> run   // updateRun merges into the file on disk and never drops a recorded stop
 export function doctorChecks({ env, home, cwd, gitProbe, ghLogin }) -> [{ name, ok, detail, required }]
 export function codexModel(home) -> string | null          // `model` from ~/.codex/config.toml
 ```
@@ -268,9 +318,11 @@ export function codexModel(home) -> string | null          // `model` from ~/.co
 ## cli.mjs
 `main(argv, { env, cwd, stdout, stderr }) -> exit code`. One handler per command. Every mutation is `commit(ctx, build)`, where `build(ledger) -> events[]` runs inside `store.write`'s compare-and-swap. GitHub side effects come after the ledger write, and the dashboard comes last (best effort).
 - **Account pinning:** `git config collab.login` holds the pinned account. A clone that isn't pinned adopts the ledger's account, and a clone pinned to another account refuses. `join` reads the ledger before it calls GitHub.
-- **Housekeeping** (`next`, `wait` and most mutations) applies `/collab pause|cancel` comments from write-access logins, expires reviewer leases, adds the fix-ci task when main CI is red and no fix-ci task is unfinished, withdraws an unclaimed fix-ci task (unless a reservation on it is still running) when main CI is green again and closes its sub-PR if it has one, and records `agent.seen` at most every 10 minutes. It drops events the fresher ledger no longer accepts, and ignores contention.
+- **Inbox:** `ctx.say` appends the agent's unread inbox (`unread` -> `inbox.inboxFor`) for `next`, `wait`, `claim`, `push`, `sync`, `verify`, `submit`, `review-claim`, `review` and `merge`, once per run, then `markRead` moves the cursor in the agent file to `ledger.seq`. `collab inbox` runs housekeeping without the CI snapshot (`ctx.live = null`). `collab wait` asks `poll.plan` how long to sleep, fetches the ledger each tick, and runs housekeeping only when the ref moved or its GitHub deadline has passed; a network or GitHub error in either skips the tick. A failed permission lookup in `directives` stops before that comment and leaves the comment cursor there. Housekeeping drops its comment events for one round when the fresher ledger has a sub-PR its own snapshot lacked.
+- **Housekeeping** (`next`, `wait`, `inbox` and most mutations) applies `/collab pause|cancel` comments from write-access logins, records their other comments on the main PR and on live sub-PRs as `comment.new`, expires reviewer leases, adds the fix-ci task when main CI is red and no fix-ci task is unfinished, withdraws an unclaimed fix-ci task (unless a reservation on it is still running) when main CI is green again and closes its sub-PR if it has one, and records `agent.seen` at most every 10 minutes. It drops events the fresher ledger no longer accepts, and ignores contention.
 - **Join:** a new ledger starts with `lastCommentId` / `lastCommentAt` at the repo's newest comment (`newestComment`, one request; best effort with a warning), so directives from an earlier collab on the same PR (before `close --purge`) are not replayed.
-- **Agent binding:** with `COLLAB_AGENT` set, `--agent` must equal it; `join` refuses a new id whose prefix is not its `--tool`; `relay` and `invite` are refused when `COLLAB_AGENT`, `COLLAB_RELAY` or `COLLAB_RELAYED` is set. `invite` gives a Codex agent and its relay a shared `COLLAB_RELAY_KEY`; `relay.request` signs with it (`sign(key, req)`) and `relay.validate` refuses unsigned or repeated requests when the relay has a key.
+- **Agent binding:** with `COLLAB_AGENT` set, `--agent` must equal it; `join` refuses a new id whose prefix is not its `--tool`; `relay`, `invite` and `keep-sessions` are refused when `COLLAB_AGENT`, `COLLAB_RELAY` or `COLLAB_RELAYED` is set. `invite` gives a Codex agent and its relay a shared `COLLAB_RELAY_KEY`; `relay.request` signs with it (`sign(key, req)`) and `relay.validate` refuses unsigned or repeated requests when the relay has a key.
+- **Session keeper:** `invite --sessions N` checks the count (1 or more, capped at `maxTasks`), that `--agent`, if given, has joined, and that no keeper of this PR runs here. It writes the keeper run (`A.newKeeperRun`), runs one `sessionsRound` itself and then spawns `keep-sessions`, which repeats `sessionsRound` every `COLLAB_SESSIONS_EVERY_MS` (default 20 s, ±20%) until a stop. Each round marks members whose process ended (failed: never joined, or never took its task or any other work), stops after 2 failures in a row, asks `sessionPlan`, reserves each open task inside its own `commit` (skipped when the freshest ledger no longer offers it), and calls `A.invite` with `keeper`, `sessions` and `steal`. It saves the run after each launch, re-reads it before and after each one, and stops a session it launched after a stop was recorded. A round with no ledger after one was seen (`sawLedger`) stops as `closed`. Between rounds it checks for a recorded stop every 500 ms. `stopKeepers` (used by `stop` and `close`) records the stop, waits up to 20 s for the keeper to exit, then `A.killKeeper`. Contention and network errors skip a round. `status` adds `sessionsStatus` / `sessionsLines`.
 - **Push guard:** `pushTask` refuses, before `git push`, a change to `.github/workflows/**`, `.github/actions/**` or `.collab.json` unless `tasks[T].allowProtected` (cleared by `task.release` and `task.claim`). `changedFiles` uses `--no-renames`, so a moved file counts at both paths.
 - **File arguments:** `--tasks` and `--body-file` must resolve inside the main checkout, the worktree collab runs from, or `config.worktreeRoot` (`relay.inside`).
 - **Command environment:** `commandEnv(env, passEnv)` removes variables whose names look like secrets before `verifyCmd` and `setupCmd` run; `passEnv` (an array of names in `.collab.json` on the default branch) keeps the ones listed.
@@ -422,7 +474,7 @@ export { lint } from "./dashboard.mjs";
 - `fake-gh-state.mjs`: `makeFakeGh(initialState)` -> `{ env: { COLLAB_GH, COLLAB_FAKE_GH_STATE }, file, read(), update(fn), calls(), use() /* sets process.env, returns restore */, cleanup() }`. The state shape is documented at the top of the file.
 - `clock.mjs`: `withNow(iso, fn)`.
 - `cli-env.mjs`: `setup()` builds a bare remote, clones, the fake gh pointed at that remote, and a temp `COLLAB_HOME`. It returns `run(clone, argv, env)` / `runAsync` / `json` / `as(clone, agentId, argv)` / `start(tasks, tools)` / `idOf(result)`, which drive the real CLI with agent env vars stripped. The use-case tests use it.
-- `fake-agent.mjs`: stands in for `claude`/`codex` under `invite`. It records argv, env and the stdin prompt to `FAKE_AGENT_LOG/<id>.json`, runs the `FAKE_AGENT_ACTIONS` collab commands (with `__ID__` replaced by its id), then idles until killed.
+- `fake-agent.mjs`: stands in for `claude`/`codex` under `invite`. It records argv, env and the stdin prompt to `FAKE_AGENT_LOG/<id>.json`, runs the `FAKE_AGENT_ACTIONS` collab commands (with `__ID__` replaced by its id, `__TASK__` by the task its prompt says to claim or take over, and `__STEAL__` by `--steal` when it is to take it over; an action naming `__TASK__` is skipped when the prompt gives none), then idles until killed (or exits at once with `FAKE_AGENT_EXIT=1`).
 - **Plan sessions in the fakes:**
   - `fake-gh` keeps issues in `issues: { "o/r#57": { title, body, state: "open"|"closed", stateReason, locked, labels: [names], author, updatedAt } }` and labels in `repos[x].labels: [{ name, color, description }]`.
   - Routes: `POST issues`, `GET issues` (PRs included, as GitHub does, each with a `pull_request` field), `GET/PATCH issues/:n`, `POST issues/:n/labels`, `GET labels/:name`, `POST labels`.

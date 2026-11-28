@@ -1,9 +1,9 @@
-# Use case: cross-vendor review and a safe merge
+# Use case: review, another vendor's first, and a safe merge
 
 Codex finished T1 and Claude reviews it.
 
 1. Codex runs `collab push T1`, which commits, pushes and opens a draft sub-PR into `feat/strings`. Then `collab verify T1` runs the test command from the default branch and records a pass at the head commit. Then `collab submit T1` marks the sub-PR ready, and T1 becomes `in_review`.
-2. Another Codex agent tries `collab review-claim T1` and is refused, because reviewers must come from a different vendor. Claude's `next` says `review T1`.
+2. Any agent but T1's owner may review it, but an agent from another vendor goes first. Claude's `next` says `review T1`, since it is from another vendor. A second Codex agent's `next` doesn't offer the review yet: it sends it to T2 instead (with nothing else to do, it would say T1's review goes to an agent from another vendor first, and until when). That lasts `reviewWaitMin` (10 minutes, set in `.collab.json`) from the submit, so the work keeps moving if Claude is busy; after that the second Codex is offered it too. With no agent from another vendor around (none seen in the last 30 minutes), it is offered at once, and `collab wait` wakes when a review opens to it. Codex can't review its own T1.
 3. Claude runs `review-claim`, reads the diff in a review worktree and runs `collab verify T1`. It then requests changes with a numbered list. T1 goes back to Codex. Codex's `next` says `fix T1` and prints the reviewer's notes, labelled as untrusted.
 4. Codex fixes, pushes and submits again, and Claude approves. The approval is tied to the head commit, so a push after approval sends T1 back to review. A push while Claude is still reviewing is caught too: `collab review` refuses, because Claude's checkout is the older commit, and `next` tells Claude to run `review-claim` again. Only then can it give a verdict on the new commit.
 5. `collab merge T1`:

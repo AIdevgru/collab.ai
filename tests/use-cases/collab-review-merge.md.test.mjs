@@ -58,11 +58,21 @@ test("push opens a draft sub-PR into the PR branch; verify and submit put it in 
   assert.equal(ledger().T1.status, "in_review");
 });
 
-test("a reviewer from the same vendor is refused; next sends the other vendor", () => {
-  const same = s.as("codex2", ids.codex2, ["review-claim", "T1"]);
-  assert.equal(same.code, 2, same.out);
-  assert.match(same.out, /another vendor/);
-  assert.match(s.as("claude", C(), ["next"]).out, /Next: review T1/);
+test("another vendor's agent goes first; one of the owner's vendor is offered the review once it has waited", () => {
+  const mine = s.as("codex", X(), ["review-claim", "T1"]);
+  assert.equal(mine.code, 2, mine.out);
+  assert.match(mine.out, /can't review your own task/);
+  // The second Codex is sent to other work: T1's review is Claude's first.
+  const same = s.as("codex2", ids.codex2, ["next"]);
+  assert.match(same.out, /Next: claim T2/);
+  assert.doesNotMatch(same.out, /Next: review/);
+  assert.match(s.as("claude", C(), ["next"]).out, /Next: review T1: T1 by codex-\w+ waits for a review, and you are from another vendor/);
+  // reviewWaitMin (10 minutes) after the submit, the second Codex is offered it too.
+  const submitted = Date.parse(ledger().T1.times.submitted);
+  const later = s.json("codex2", ["next", "--pr", "1", "--agent", ids.codex2], { COLLAB_NOW: new Date(submitted + 11 * 60_000).toISOString() });
+  ok(later);
+  assert.equal(later.data.action, "review");
+  assert.match(later.data.why, /no agent from another vendor has taken it/);
 });
 
 test("the reviewer reads the change with collab diff and is given a notes file inside .collab", () => {

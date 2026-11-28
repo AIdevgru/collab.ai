@@ -7,7 +7,7 @@
 
 import { human } from "./clock.mjs";
 import { intersect } from "./glob.mjs";
-import { VENDORS, derive, isTerminal, taskIds, vendorOf } from "./ledger.mjs";
+import { VENDORS, ciAt, ciMode, derive, isTerminal, taskIds, vendorOf, verified } from "./ledger.mjs";
 
 const MAX_CHARS = 10_000;
 const MANY_TASKS = 15;
@@ -140,7 +140,6 @@ function subOf(lv, id, t) {
   };
 }
 
-const passingVerify = (t, sha) => !!sha && (t.verify ?? []).some((v) => v.ok === true && v.sha === sha);
 // What a claim with --allow-overlap accepted ("T1 (codex-ab12): files"), without the tasks that
 // have finished since: the warning is only worth showing while both are in flight.
 // The owner named is the one who holds that task now, not the one at claim time.
@@ -167,12 +166,12 @@ function analyze(L, live, now) {
     const submitted = t.times?.submitted;
     const waitH = t.status === "in_review" && okTime(submitted) ? (at - ms(submitted)) / 3_600_000 : null;
     return {
-      id, t, terminal, sub,
+      id, t, terminal, sub, ciMode: ciMode(L), verified: verified(L, t),
       inProgress: !!dt.inProgress,
       stale: !terminal && !!dt.stale,
       needsOwner: !terminal && t.blocked?.needsOwner === true,
       agentBlocked: !terminal && !!t.blocked && t.blocked.needsOwner !== true,
-      redCi: !terminal && sub?.ci === "FAILURE",
+      redCi: !terminal && (sub?.ci === "FAILURE" || (ciMode(L) && ciAt(t)?.state === "failed" && !verified(L, t))),
       conflict: !terminal && sub?.mergeable === "CONFLICTING",
       noReviewer: t.status === "in_review" && (dt.eligibleReviewers ?? []).length === 0,
       waitH,
@@ -357,7 +356,7 @@ function needsAttention(a, prUrl) {
       else items.push(`**Any agent:** the main PR's CI is failing, so sub-PR merges are frozen. The next \`collab next\` adds a task to fix it.`);
     }
     for (const r of rows.filter((x) => x.noReviewer)) {
-      items.push(`**Owner:** ${title(r)} waits for a review, but no agent from another vendor has joined. Invite an agent from another vendor, or the owner can run \`collab waive-review ${safeId(r.id)} --pr ${n}\` in their own terminal.`);
+      items.push(`**Owner:** ${title(r)} waits for a review, but no other agent has joined. Invite one (an agent from another vendor reviews first), or run \`collab waive-review ${safeId(r.id)} --pr ${n}\` in your own terminal.`);
     }
     if (key === "idle") {
       const left = rows.filter((r) => !r.terminal).length;
@@ -368,13 +367,13 @@ function needsAttention(a, prUrl) {
       items.push(`**Any agent:** ${title(r)} is stale: ${owner(r)}'s lease ran out at ${when(r.t.leaseUntil)}. \`collab next\` hands it to another agent.`);
     }
     for (const r of rows.filter((x) => x.redCi)) {
-      items.push(`**${owner(r)}:** CI is failing on ${safeId(r.id)}'s sub-PR #${Number(r.t.subPr) || "?"} (${text(r.t.title, TITLE_MAX)}). Fix it and run \`collab push ${safeId(r.id)}\`.`);
+      items.push(`**${owner(r)}:** CI is failing on ${safeId(r.id)}${r.sub?.ci === "FAILURE" ? `'s sub-PR #${Number(r.t.subPr) || "?"}` : ""} (${text(r.t.title, TITLE_MAX)}). Fix it and run \`collab push ${safeId(r.id)}\`.`);
     }
     for (const r of rows.filter((x) => x.conflict)) {
       items.push(`**${owner(r)}:** ${safeId(r.id)}'s sub-PR #${Number(r.t.subPr) || "?"} conflicts with ${head}. Run \`collab sync ${safeId(r.id)}\` and resolve the conflicts.`);
     }
     for (const r of rows.filter((x) => x.slowReview && !x.noReviewer)) {
-      const actor = r.t.reviewer ? `**${md(r.t.reviewer)}:** finish the review of` : "**An agent from another vendor:** review";
+      const actor = r.t.reviewer ? `**${md(r.t.reviewer)}:** finish the review of` : "**Another agent:** review";
       items.push(`${actor} ${title(r)}. It has waited ${waited(r.waitH)} since ${when(r.t.times.submitted)}; the alert is at ${plural(a.alertH, "hour")}.`);
     }
     for (const r of rows.filter((x) => x.manyRounds)) {
@@ -438,11 +437,14 @@ function reviewerCell(L, t) {
 function ciCell(r) {
   const t = r.t;
   if (t.status === "cancelled") return "Not run";
+  // The CI collab started on the task's branch ("verify": "ci"), unless the sub-PR's own checks fail.
+  const ci = r.ciMode ? ciAt(t) : null;
+  if (ci && (r.sub?.ci !== "FAILURE" || ci.state === "running")) return ci.state === "running" ? "⏳ Running" : ci.state === "passed" ? "✅ Passed" : "❌ Failed";
   switch (r.sub?.ci) {
     case "SUCCESS": return "✅ Passed";
     case "FAILURE": return "❌ Failed";
     case "PENDING": return "⏳ Running";
-    case "NONE": return passingVerify(t, t.headSha) ? "✅ Verified locally (no checks)" : "No checks";
+    case "NONE": return r.verified ? "✅ Verified locally (no checks)" : "No checks";
     default: break;
   }
   if (t.status === "done") return "✅ Passed"; // a merge needs green CI or a passing verify
@@ -512,6 +514,7 @@ function describe(e) {
     case "task.release": return say(`released ${task}`);
     case "task.push": return say(`pushed to ${task}`);
     case "task.verify": return say(`ran the tests on ${task}: ${d.ok === false ? "failed" : "passed"}`);
+    case "task.ci": return say(d.state === "started" ? `started CI on ${task}` : `saw CI ${d.state === "passed" ? "pass" : "fail"} on ${task}`);
     case "task.submit": return say(`submitted ${task} for review`);
     case "review.claim": return say(`started reviewing ${task}`);
     case "review.verdict": return say(d.verdict === "changes" ? `requested changes on ${task}` : `approved ${task}`);
@@ -520,7 +523,10 @@ function describe(e) {
     case "task.block": return say(d.needsOwner ? `asked the owner to decide on ${task}` : `marked ${task} blocked`);
     case "task.unblock": return say(d.decision != null ? `recorded a decision on ${task} and unblocked it` : `unblocked ${task}`);
     case "task.note": return say(`added a note to ${task}`);
+    case "agent.msg": return say(d.to === "all" ? "sent a message to every agent" : `sent a message to ${md(d.to ?? "an agent") || "an agent"}`);
+    case "comment.new": return { actor: md(d.login ?? "someone") || "someone", phrase: e.task ? `commented on ${task}'s sub-PR` : "commented on the PR" };
     case "review.waive": return say(`waived the review of ${task}`);
+    case "config.verify": return say(d.verify === "ci" ? "moved the tests to CI" : "moved the tests to the agents' machines");
     case "reviewer.expire": return say(`cleared the expired review lease on ${task}`);
     case "directive": {
       const by = md(d.login ?? "someone") || "someone";

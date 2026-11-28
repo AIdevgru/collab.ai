@@ -2,6 +2,7 @@
 // machine check (`collab doctor`). Nothing here runs unless the owner asks for it.
 
 import { spawn, spawnSync } from "node:child_process";
+import { randomInt } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -9,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { CollabError, EXIT } from "./errors.mjs";
 import { childEnv as cleanPath } from "./config.mjs";
 import { gitVersion } from "./git.mjs";
-import { aliveFile, newKey } from "./relay.mjs";
+import { aliveFile, newKey, writeAtomic } from "./relay.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const CLI = path.resolve(HERE, "..", "bin", "collab.mjs");
@@ -37,7 +38,7 @@ export const inherited = (name, tool) => !MARKERS.test(name) || Boolean(tool && 
 export const collabHome = (env = process.env) => env.COLLAB_HOME ?? path.join(homedir(), ".collab");
 export const runsDir = (env) => path.join(collabHome(env), "runs");
 
-export function startupPrompt({ url, number, tool, agent, task, review, launcher, template = readFileSync(TEMPLATE, "utf8") }) {
+export function startupPrompt({ url, number, tool, agent, task, steal, review, sessions, launcher, template = readFileSync(TEMPLATE, "utf8") }) {
   let base = template.replaceAll("{{url}}", url).replaceAll("{{number}}", String(number)).replaceAll("{{tool}}", tool);
   // An invited Claude is only allowed to run the launcher by its absolute path.
   if (launcher) base = base.replaceAll('"$HOME/.collab/bin/collab.mjs"', `"${launcher}"`);
@@ -47,7 +48,9 @@ export function startupPrompt({ url, number, tool, agent, task, review, launcher
     `    node ${L} join ${url} --tool ${tool} --agent ${agent}`,
     `and pass --agent ${agent} on every later call.`,
   ];
-  if (task) lines.push(`After joining, claim ${task}: node ${L} claim ${task} --pr ${number} --agent ${agent}. Then follow \`collab next\`.`);
+  if (sessions) lines.push(`You are one of up to ${sessions} sessions the owner runs in parallel on this PR, each on its own task. When you change something another task relies on, tell the others with the msg command.`);
+  if (task && steal) lines.push(`After joining, take over ${task}, whose owner stopped mid-task: node ${L} claim ${task} --steal --pr ${number} --agent ${agent}. Its branch and commits are kept. Then follow \`collab next\`.`);
+  else if (task) lines.push(`After joining, claim ${task}: node ${L} claim ${task} --pr ${number} --agent ${agent}. Then follow \`collab next\`.`);
   if (review) lines.push(`After joining, review ${review}: node ${L} review-claim ${review} --pr ${number} --agent ${agent}. Then follow \`collab next\`.`);
   lines.push("You are running without a human watching. Stop when `collab next` says done, paused or closed, or when `collab wait` twice in a row finds nothing to do.");
   return `${base.trimEnd()}\n\n${lines.join("\n")}\n`;
@@ -123,14 +126,16 @@ const tick = () => {
 setTimeout(tick, Math.min(5000, Number(ms)));
 `;
 
-export async function invite({ tool, root, repo, pr, url, agent, model, task, review, timeoutMs, env = process.env }) {
+// `keeper` and `sessions`: the session keeper that started this agent, and how many sessions it runs.
+export async function invite({ tool, root, repo, pr, url, agent, model, task, steal, review, timeoutMs, keeper, sessions, env = process.env }) {
   const runDir = path.join(runsDir(env), agent);
   mkdirSync(runDir, { recursive: true });
   mkdirSync(path.join(root, ".collab"), { recursive: true });
   const spec = launchSpec(tool, { root, runDir, agent, model, env });
   const promptFile = path.join(runDir, "prompt.md");
-  writeFileSync(promptFile, startupPrompt({ url, number: pr, tool, agent, task, review, launcher: tool === "claude" ? launcherPath(env) : undefined }));
+  writeFileSync(promptFile, startupPrompt({ url, number: pr, tool, agent, task, steal, review, sessions, launcher: tool === "claude" ? launcherPath(env) : undefined }));
   const run = { id: agent, tool, repo, pr, root, startedAt: new Date().toISOString(), deadline: new Date(Date.now() + timeoutMs).toISOString(), cmd: [spec.cmd, ...spec.args] };
+  if (keeper) Object.assign(run, { keeper, task: task ?? null });
   const sanitized = Object.fromEntries(Object.entries(env).filter(([k]) => inherited(k)));
   if (spec.relay) {
     // Only this agent and its relay hold the key, in their environments: the relay then runs
@@ -193,15 +198,76 @@ export function killRun(run, reason = "stopped", { fromWatchdog = reason === "ti
 }
 
 // Record that a run is over. Called last, so "stopped" also means its tasks were released.
+// The file as it is now, not as the caller read it: a session keeper updates its own while it runs.
 export function markStopped(run, reason, killed = []) {
-  const done = { ...run, stoppedAt: new Date().toISOString(), stopReason: reason, killed };
+  const done = { ...(readRunFile(run.file) ?? run), stoppedAt: new Date().toISOString(), stopReason: reason, killed };
   delete done.file;
-  writeFileSync(run.file, JSON.stringify(done, null, 2));
+  writeAtomic(run.file, JSON.stringify(done, null, 2));
   return done;
 }
 
 export function stopRun(run, reason = "stopped") {
   return markStopped(run, reason, killRun(run, reason));
+}
+
+// ---------------------------------------------------------------- session keeper
+
+// `collab invite <tool> --sessions N` starts a keeper: one detached `collab keep-sessions` process
+// that starts invited agents while there is work for them, up to N at once. Its run sits next to
+// the agents' runs, with kind "sessions" and an id no tool uses.
+export const isKeeper = (run) => run?.kind === "sessions";
+export const keeperId = () => `sessions-${randomInt(36 ** 4).toString(36).padStart(4, "0")}`;
+
+const readRunFile = (file) => {
+  try { return { ...JSON.parse(readFileSync(file, "utf8")), file }; } catch { return null; }
+};
+export const readRun = (id, env = process.env) => readRunFile(path.join(runsDir(env), id, "run.json"));
+
+// Merge `patch` into a run file as it is on disk now. A stop recorded meanwhile is kept: the keeper
+// writes its progress while `collab stop` may be marking it stopped.
+export function updateRun(run, patch) {
+  // A file that can't be read right now (Windows may hold it open) falls back to the caller's copy, so
+  // the keeper never loses its kind, PR or deadline.
+  const disk = readRunFile(run.file) ?? (() => { const copy = { ...run }; delete copy.file; return copy; })();
+  const next = { ...disk, ...patch };
+  for (const k of ["stoppedAt", "stopReason", "killed"]) if (disk[k] !== undefined) next[k] = disk[k];
+  delete next.file;
+  writeAtomic(run.file, JSON.stringify(next, null, 2));
+  return { ...next, file: run.file };
+}
+
+// The keeper's run, before its process starts: `invite` does the first round itself, so it can say
+// which sessions started.
+export function newKeeperRun({ root, repo, pr, tool, target, host, model, timeoutMs, env = process.env }) {
+  const id = keeperId();
+  const runDir = path.join(runsDir(env), id);
+  mkdirSync(runDir, { recursive: true });
+  const run = {
+    id, kind: "sessions", tool, repo, pr, root, target, host: host ?? null, model: model ?? null,
+    startedAt: new Date().toISOString(), deadline: new Date(Date.now() + timeoutMs).toISOString(),
+    members: [], launches: 0, failStreak: 0, pid: null, file: path.join(runDir, "run.json"),
+  };
+  return { ...updateRun(run, run), runDir };
+}
+
+// The keeper process alone, not its tree. On Windows the sessions it started (and their watchdogs)
+// are its children, and `taskkill /T` would take them too; on POSIX each is in its own group anyway.
+export function killKeeper(run) {
+  if (!run?.pid || !isAlive(run.pid)) return [];
+  try { process.kill(run.pid); } catch { return []; }
+  return [run.pid];
+}
+
+// The detached `collab keep-sessions --run <id>`, in the repo root, without the inviting session's
+// agent markers. It runs until the collab is done or closed, it is stopped, or its deadline.
+export function spawnKeeper(run, env = process.env) {
+  const runDir = path.dirname(run.file);
+  // The tool's own setup stays (how its agents sign in, which provider): the keeper hands it to every
+  // session it starts, as `invite` would. Session markers go, so the keeper is not an agent session.
+  const sanitized = Object.fromEntries(Object.entries(env).filter(([k]) => inherited(k, run.tool)));
+  const child = spawnDetached(process.execPath, [CLI, "keep-sessions", "--run", run.id, "--pr", String(run.pr)], { cwd: run.root, env: sanitized, logBase: path.join(runDir, "keeper") });
+  if (!child.pid) throw new CollabError(EXIT.ENV, `could not start the session keeper; see ${path.join(runDir, "keeper.err.log")}`);
+  return { ...updateRun(run, { pid: child.pid }), runDir };
 }
 
 // ---------------------------------------------------------------- doctor

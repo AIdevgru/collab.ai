@@ -4,6 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  # collab's CI verify ("verify": "ci" in .collab.json) dispatches this workflow on a task branch.
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Run on Windows too, as for a PR into the default branch"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -14,19 +21,31 @@ concurrency:
 
 jobs:
   test:
-    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    name: test (${{ matrix.os }}, node ${{ matrix.node }}, shard ${{ matrix.shard }}/3)
     strategy:
       fail-fast: false
       matrix:
-        # Windows matters: junction links, CRLF shims and path handling only break there.
-        os: [ubuntu-latest, windows-latest]
+        # Two tiers. Windows matters: junction links, CRLF shims and path handling only break there.
+        # It is also the slow half, so it runs where a change is about to reach the default branch:
+        # pushes to it, PRs into it, and a dispatch with "full" set. A PR into any other branch (a
+        # collab sub-PR into its PR branch, or a stacked PR) and a collab verify dispatch run on Linux
+        # only. Their changes still meet Windows on the PR into the default branch.
+        os: ${{ fromJSON((github.event_name == 'push' || github.base_ref == github.event.repository.default_branch || inputs.full) && '["ubuntu-latest","windows-latest"]' || '["ubuntu-latest"]') }}
         node: [22, 24]
+        # node --test sorts the test files and keeps file i in shard (i % 3) + 1. The 3 in the
+        # name above and in the test step must equal the length of this list.
+        shard: [1, 2, 3]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    # The slowest shard takes about 7 minutes on a private repo's 2-core Windows runner. The whole
+    # suite in one job took about 19.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
       - run: git config --global user.name "collab-ci" && git config --global user.email "collab-ci@users.noreply.github.com"
-      - run: npm test
+      # The command of npm test (package.json scripts.test), plus the shard. It can't go through npm:
+      # after the glob, node no longer reads --test-shard as an option, so every shard would run the
+      # whole suite.
+      - run: node --test --test-shard=${{ matrix.shard }}/3 "tests/**/*.test.mjs"

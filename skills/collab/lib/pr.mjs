@@ -209,6 +209,58 @@ export function ciFilteredToDefault(cwd, defaultBranch) {
   return false;
 }
 
+// What stops `collab verify` from starting the workflows in ciWorkflows on a task's branch, as
+// they are on origin/<default> (GitHub only starts a workflow_dispatch run of a workflow the
+// default branch has): one line per workflow that is missing or has no workflow_dispatch trigger.
+export function ciWorkflowProblems(cwd, defaultBranch, workflows) {
+  const ref = `origin/${defaultBranch}`;
+  const out = [];
+  for (const wf of workflows ?? []) {
+    const text = showFile(cwd, ref, `.github/workflows/${wf}`);
+    if (text === null || text === undefined) out.push(`${wf} is not in .github/workflows on ${defaultBranch}`);
+    else if (!hasDispatchTrigger(text)) out.push(`${wf} has no workflow_dispatch trigger, so collab can't start it; add \`workflow_dispatch:\` to its on: block`);
+  }
+  return out;
+}
+
+// The workflow files on origin/<default> that collab can start (they have a workflow_dispatch
+// trigger), by file name: what `collab tests remote` offers when no workflow is named.
+export function dispatchableWorkflows(cwd, defaultBranch) {
+  const ref = `origin/${defaultBranch}`;
+  return lsFiles(cwd, ref).filter((f) => WORKFLOW_RE.test(f)).filter((f) => hasDispatchTrigger(showFile(cwd, ref, f))).map((f) => f.split("/").pop());
+}
+
+// The ones of these workflows on origin/<default> that also run on pull requests: GitHub already
+// runs them on a PR's code, so starting them on a task's branch exposes nothing new.
+export function pullRequestWorkflows(cwd, defaultBranch, workflows) {
+  const ref = `origin/${defaultBranch}`;
+  return (workflows ?? []).filter((wf) => hasPullRequestTrigger(showFile(cwd, ref, `.github/workflows/${wf}`)));
+}
+
+// Pure, line-based: does the workflow's `on:` have a pull_request trigger (not
+// pull_request_target, which runs with the base branch's secrets)? Any branch filter counts.
+export function hasPullRequestTrigger(yamlText) {
+  const lines = toLines(yamlText);
+  const onIdx = lines.findIndex((l) => l.indent === 0 && /^["']?on["']?\s*:/.test(l.text));
+  if (onIdx < 0) return false;
+  const PR = /(^|[\s,["'])pull_request(?=$|[\s,\]"':])/;
+  const onValue = valueAfterKey(lines[onIdx].text);
+  if (onValue) return PR.test(onValue);
+  const onBlock = blockAfter(lines, onIdx);
+  if (!onBlock.length) return false;
+  const evIndent = onBlock[0].indent;
+  return onBlock.some((l) => l.indent === evIndent && /^(-\s*)?["']?pull_request["']?\s*(:|$)/.test(l.text));
+}
+
+// Pure, line-based: does the workflow's `on:` list workflow_dispatch (as a key, in a list, or
+// as its only event)?
+export function hasDispatchTrigger(yamlText) {
+  const text = String(yamlText ?? "").replace(/#.*$/gm, "");
+  return /^["']?on["']?\s*:\s*(\[[^\]]*\bworkflow_dispatch\b[^\]]*\]|["']?workflow_dispatch["']?)\s*$/m.test(text)
+    || /^\s+["']?workflow_dispatch["']?\s*:/m.test(text)
+    || /^\s+-\s+["']?workflow_dispatch["']?\s*$/m.test(text);
+}
+
 // Pure, line-based (no YAML library). True when the workflow has a pull_request or
 // pull_request_target trigger and every such trigger has a `branches:` list holding only the
 // default branch. Flow mappings beyond `{ branches: [...] }` are treated as unfiltered.

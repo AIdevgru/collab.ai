@@ -58,8 +58,11 @@ test("comments that don't count are recorded as directives and change nothing", 
 
 test("a /collab agree comment from a person completes agreement, with one notice", () => {
   p.s.browserComment("alice", n, `Happy with this.\n/collab agree r3 ${p.hash8(n)}`);
-  const r = p.plan("zwymer", "next", n);
+  // status is the command people run to check, so it applies the comment too.
+  const r = p.plan("zwymer", "status", n);
   ok(r);
+  assert.match(r.out, /✅ Agreed/, r.out);
+  assert.doesNotMatch(r.out, /waiting on alice/i, r.out);
   const l = p.ledger(n);
   assert.equal(l.agreements.alice.via, "comment");
   assert.equal(l.phase, "agreed");

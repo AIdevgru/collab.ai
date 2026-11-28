@@ -13,6 +13,9 @@ test("validate allows only agent commands", () => {
   try {
     assert.equal(validate(root, { v: 1, argv: ["next", "--pr", "1"], cwd: "." }).ok, true);
     assert.equal(validate(root, { v: 1, argv: ["diff", "T1", "--stat"], cwd: "." }).ok, true, "reviewers read diffs through the relay");
+    assert.equal(validate(root, { v: 1, argv: ["msg", "all", "--body", "hi"], cwd: "." }).ok, true, "sandboxed agents can message the others");
+    assert.equal(validate(root, { v: 1, argv: ["inbox", "--peek"], cwd: "." }).ok, true);
+    assert.equal(validate(root, { v: 1, argv: ["msg", "all", "--body-file", "../outside.md"], cwd: "." }).ok, false, "a message body is read from inside the repo only");
     for (const cmd of ["invite", "relay", "doctor", "resume", "decide", "waive-review", "stop", "close", "rm"]) {
       const v = validate(root, { v: 1, argv: [cmd], cwd: "." });
       assert.equal(v.ok, false, cmd);

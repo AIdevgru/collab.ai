@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { EXIT } from "../../skills/collab/lib/errors.mjs";
-import { MARK_END, MARK_START, checkSupported, ciFilteredToDefault, markedBlock, parseIssueRef, parsePrRef, readBlock, readMarker, splice, workflowFiltersToDefault } from "../../skills/collab/lib/pr.mjs";
+import { MARK_END, MARK_START, checkSupported, ciFilteredToDefault, ciWorkflowProblems, hasDispatchTrigger, hasPullRequestTrigger, markedBlock, parseIssueRef, parsePrRef, readBlock, readMarker, splice, workflowFiltersToDefault } from "../../skills/collab/lib/pr.mjs";
 import { makeRepo, sh } from "../helpers/bare-remote.mjs";
 
 // ---------------------------------------------------------------------------
@@ -309,6 +309,66 @@ test("ciFilteredToDefault reads .github/workflows at origin/<default> through gi
     sh(["push", "--quiet", "origin", "main"], a);
     sh(["fetch", "--quiet", "origin"], a);
     assert.equal(ciFilteredToDefault(a, "main"), true);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// ciWorkflowProblems ("verify": "ci")
+
+test("hasDispatchTrigger finds workflow_dispatch as a key, in a list, or as the only event", () => {
+  for (const [name, text] of [
+    ["key", "on:\n  push:\n  workflow_dispatch:\njobs: {}\n"],
+    ["key with inputs", "on:\n  workflow_dispatch:\n    inputs:\n      x:\n        type: string\n"],
+    ["flow list", "on: [push, workflow_dispatch]\n"],
+    ["scalar", "on: workflow_dispatch\n"],
+    ["block sequence", "on:\n  - push\n  - workflow_dispatch\n"],
+    ["quoted, CRLF", "'on':\r\n  \"workflow_dispatch\":\r\n"],
+  ]) assert.equal(hasDispatchTrigger(text), true, name);
+  for (const [name, text] of [
+    ["none", "on:\n  pull_request:\n    branches: [main]\n"],
+    ["commented out", "on:\n  push:\n  # workflow_dispatch:\n"],
+    ["only in an if", "on: push\njobs:\n  t:\n    if: github.event_name == 'workflow_dispatch'\n"],
+  ]) assert.equal(hasDispatchTrigger(text), false, name);
+});
+
+test("hasPullRequestTrigger: a workflow GitHub runs on pull requests, with any branch filter", () => {
+  for (const [name, text] of [
+    ["key with branches", "on:\n  pull_request:\n    branches: [main]\n  workflow_dispatch:\n"],
+    ["bare key", "on:\n  push:\n  pull_request:\n"],
+    ["flow list", "on: [push, pull_request, workflow_dispatch]\n"],
+    ["scalar", "on: pull_request\n"],
+    ["block sequence", "on:\n  - workflow_dispatch\n  - pull_request\n"],
+    ["quoted, CRLF", "'on':\r\n  \"pull_request\":\r\n    types: [opened]\r\n"],
+  ]) assert.equal(hasPullRequestTrigger(text), true, name);
+  for (const [name, text] of [
+    ["dispatch only (a deploy)", "on:\n  workflow_dispatch:\n    inputs: {}\njobs: {}\n"],
+    ["push to main", "on:\n  push:\n    branches: [main]\n  workflow_dispatch:\n"],
+    ["pull_request_target", "on:\n  pull_request_target:\n  workflow_dispatch:\n"],
+    ["pull_request_target in a list", "on: [pull_request_target, workflow_dispatch]\n"],
+    ["commented out", "on:\n  workflow_dispatch:\n  # pull_request:\n"],
+    ["only deeper down", "on:\n  workflow_dispatch:\njobs:\n  pull_request:\n    runs-on: x\n"],
+    ["no on", "name: x\n"],
+  ]) assert.equal(hasPullRequestTrigger(text), false, name);
+});
+
+test("ciWorkflowProblems names workflows the default branch lacks or can't start", () => {
+  const repo = makeRepo();
+  try {
+    const a = repo.clone("a");
+    mkdirSync(join(a, ".github", "workflows"), { recursive: true });
+    writeFileSync(join(a, ".github", "workflows", "ci.yml"), "on:\n  pull_request:\n    branches: [main]\n  workflow_dispatch:\n");
+    writeFileSync(join(a, ".github", "workflows", "lint.yml"), "on: [push, pull_request]\n");
+    sh(["add", "-A"], a);
+    sh(["commit", "--quiet", "-m", "ci"], a);
+    sh(["push", "--quiet", "origin", "main"], a);
+    sh(["fetch", "--quiet", "origin"], a);
+    assert.deepEqual(ciWorkflowProblems(a, "main", ["ci.yml"]), []);
+    const p = ciWorkflowProblems(a, "main", ["ci.yml", "lint.yml", "e2e.yml"]);
+    assert.equal(p.length, 2);
+    assert.match(p[0], /^lint\.yml has no workflow_dispatch trigger, so collab can't start it/);
+    assert.match(p[1], /^e2e\.yml is not in \.github\/workflows on main/);
   } finally {
     repo.cleanup();
   }

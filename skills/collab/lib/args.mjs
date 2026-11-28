@@ -3,7 +3,7 @@
 const BOOLEANS = new Set([
   "json", "dry-run", "steal", "allow-overlap", "owner", "approve", "changes", "print", "write",
   "help", "offline", "no-dashboard", "force", "once", "purge", "stat", "allow-protected",
-  "withdraw", "raw", "all",
+  "peek", "all", "withdraw", "raw",
 ]);
 
 export function parseArgs(argv) {

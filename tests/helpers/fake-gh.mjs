@@ -378,6 +378,7 @@ function restComment(state, repo, n, c) {
     id: c.id,
     node_id: `IC_${c.id}`,
     html_url: `https://github.com/${repo}/${isIssue(state, repo, n) ? "issues" : "pull"}/${n}#issuecomment-${c.id}`,
+    issue_url: `https://api.github.com/repos/${repo}/issues/${n}`,
     body: c.body ?? "",
     user: { login: c.login ?? c.user?.login ?? null },
     created_at: created,
@@ -437,7 +438,12 @@ function repos(state, method, seg, body, login, query = new URLSearchParams()) {
     // Every issue and PR comment in the repo; ids are unique across it.
     const mine = Object.entries(state.comments ?? {}).filter(([k]) => k.toLowerCase().startsWith(`${repo.toLowerCase()}#`));
     const dir = query.get("direction") === "desc" ? -1 : 1;
-    return { list: mine.flatMap(([k, l]) => l.map((c) => restComment(state, repo, Number(k.split("#")[1]), c))).sort((a, b) => dir * (a.id - b.id)) };
+    const since = query.get("since") ? Date.parse(query.get("since")) : null;
+    return {
+      list: mine.flatMap(([k, l]) => l.map((c) => restComment(state, repo, Number(k.split("#")[1]), c)))
+        .filter((c) => since == null || Date.parse(c.updated_at) >= since)
+        .sort((a, b) => dir * (a.id - b.id)),
+    };
   }
   if (route === "GET issues/:n/comments" || route === "POST issues/:n/comments") {
     const key = findKey(state.comments, `${repo}#${n}`) ?? `${repo}#${n}`;
@@ -547,6 +553,35 @@ function repos(state, method, seg, body, login, query = new URLSearchParams()) {
     else if (Array.isArray(r.branches)) r.branches = r.branches.filter((b) => b !== branch);
     (r.deletedBranches ??= []).push(branch);
     return { data: undefined };
+  }
+  // Actions ("verify": "ci"): a workflow_dispatch makes a run at the branch's tip; runs list by commit.
+  if (rest[0] === "actions" && rest[1] === "workflows" && rest.length === 4) {
+    const name = rest[2];
+    const wf = (r.workflows ?? {})[name];
+    if (!wf) return httpFail(404, "Not Found");
+    if (method === "POST" && rest[3] === "dispatches") {
+      if (wf.dispatch === false) return httpFail(422, "Workflow does not have 'workflow_dispatch' trigger");
+      const ref = String(body.ref ?? "");
+      const sha = r.gitDir ? gitRev(r.gitDir, ref) : fakeSha(`${repo}:${ref}`);
+      if (!sha) return httpFail(422, `No ref found for: ${ref}`);
+      const id = state.nextRunId ?? 5000;
+      state.nextRunId = id + 1;
+      (r.runs ??= []).push({ id, workflow: name, headSha: sha, headBranch: ref, event: "workflow_dispatch", status: wf.status ?? "queued", conclusion: wf.conclusion ?? null, createdAt: nowIso() });
+      return { data: undefined };
+    }
+    if (method === "GET" && rest[3] === "runs") {
+      const sha = query.get("head_sha");
+      const runs = (r.runs ?? []).filter((x) => x.workflow === name && (!sha || x.headSha === sha));
+      return {
+        data: {
+          total_count: runs.length,
+          workflow_runs: runs.map((x) => ({
+            id: x.id, name: x.workflow, head_sha: x.headSha, head_branch: x.headBranch, event: x.event, status: x.status, conclusion: x.conclusion,
+            html_url: `https://github.com/${repo}/actions/runs/${x.id}`, created_at: x.createdAt,
+          })),
+        },
+      };
+    }
   }
   return httpFail(404, "Not Found");
 }

@@ -4,7 +4,12 @@
 import { CollabError, EXIT } from "./errors.mjs";
 import { addMinutes } from "./clock.mjs";
 
-export const SCHEMA = 1;
+// 1: the original ledger. 2: the tests run on CI ("verify": "ci"). A collab that only knows 1
+// would ignore that and merge without CI, so a ledger becomes 2 once it runs the tests on CI, and
+// such a collab refuses it ("update collab").
+export const SCHEMA = 2;
+const SCHEMAS = new Set([1, 2]);
+const schemaFor = (config) => (config?.verify === "ci" ? 2 : 1);
 export const STATUSES = Object.freeze(["open", "claimed", "in_review", "changes_requested", "approved", "done", "cancelled"]);
 export const PHASES = Object.freeze(["planning", "active", "paused", "closed"]);
 export const VENDORS = Object.freeze({ claude: "anthropic", codex: "openai", gemini: "google", grok: "xai", other: "other" });
@@ -14,19 +19,43 @@ export const OWNER = "owner"; // the human owner acting from a terminal or a PR 
 
 // Same values as DEFAULTS in config.mjs (inlined so the reducer has no I/O imports).
 const DEFAULT_CONFIG = Object.freeze({
-  leaseMin: 90, reviewLeaseMin: 60, planLeaseMin: 15, reviewAlertH: 2, maxTasks: 12, wip: 1,
-  worktreeRoot: ".collab/wt", verifyCmd: null, setupCmd: null,
+  leaseMin: 90, reviewLeaseMin: 60, planLeaseMin: 15, reviewAlertH: 2, reviewWaitMin: 10, maxTasks: 12, wip: 1,
+  worktreeRoot: ".collab/wt", verify: "local", verifyCmd: null, setupCmd: null,
 });
 
+// "verify": "ci" in .collab.json: CI runs a task's tests (collab verify starts the workflows in
+// ciWorkflows on its branch) instead of each agent running them on its own machine.
+export const ciMode = (ledger) => ledger?.config?.verify === "ci";
+// The CI record for this commit of the task, or null: { sha, state: running|passed|failed, by,
+// at, runs[], summary, doneAt? }. A push moves the head, so an older record says nothing.
+export const ciAt = (t, sha = t?.headSha) => (sha && t?.ci?.sha === sha ? t.ci : null);
+// CI on a task's branch runs the workflow files as that branch has them, so a task that changes
+// one has its tests run on the machine instead.
+const WORKFLOW_FILE = /^\.github\/(workflows|actions)\//i;
+const WORKFLOW_NAME = /^[A-Za-z0-9_.-]+\.ya?ml$/;
+export const touchesWorkflows = (t) => (t?.touched ?? []).filter((f) => WORKFLOW_FILE.test(String(f).replace(/\\/g, "/")));
+// Whether the tests passed at this commit of the task. With the tests on CI, a CI failure recorded
+// there outweighs any pass, and a pass from CI counts only while the CI record still says passed
+// (merge reads GitHub again, and records a failure if GitHub now says otherwise).
+export function verified(L, t, sha = t?.headSha) {
+  if (!sha || !t) return false;
+  const ci = ciAt(t, sha);
+  if (ciMode(L) && ci?.state === "failed") return false;
+  return (t.verify ?? []).some((v) => v.ok === true && v.sha === sha && (v.via !== "ci" || ci?.state === "passed"));
+}
+
 // Events still allowed while the phase is paused or closed.
-const PAUSED_OK = new Set(["directive", "phase.set", "comments.seen", "notice.sent", "agent.seen", "agent.join"]);
+const PAUSED_OK = new Set(["directive", "phase.set", "config.verify", "comments.seen", "comment.new", "notice.sent", "agent.seen", "agent.join"]);
 // The only events allowed while planning.
-const PLANNING_OK = new Set(["agent.join", "agent.seen", "planner.lease", "plan", "directive", "comments.seen", "notice.sent", "phase.set"]);
+const PLANNING_OK = new Set(["agent.join", "agent.seen", "planner.lease", "plan", "directive", "comments.seen", "comment.new", "agent.msg", "notice.sent", "phase.set", "config.verify"]);
 // Statuses an owner holds a lease on, and that a steal can take over.
 const STEALABLE = new Set(["claimed", "changes_requested", "approved"]);
 // Statuses that count against the WIP limit.
 const WIP_STATUSES = new Set(["claimed", "changes_requested"]);
 const LIVE_STATUSES = new Set(["claimed", "changes_requested", "in_review", "approved"]);
+// An agent counts as around while it was seen this recently (a free agent's `collab next` marks it
+// seen every 10 minutes) or holds a live lease.
+export const ACTIVE_MIN = 30;
 
 export function vendorOf(tool) {
   return Object.hasOwn(VENDORS, tool) ? VENDORS[tool] : "other";
@@ -75,7 +104,7 @@ export function newLedger({ pr, config, agent, now, lastCommentId = 0, lastComme
   for (const [k, v] of Object.entries(config ?? {})) if (v !== undefined) cfg[k] = v;
   const tool = agent.tool ?? "other";
   return {
-    schema: SCHEMA,
+    schema: schemaFor(cfg),
     seq: 0,
     rev: null,
     pr: { ...structuredClone(pr), mergeMethod: pr.mergeMethod ?? "squash" },
@@ -100,11 +129,12 @@ export function newLedger({ pr, config, agent, now, lastCommentId = 0, lastComme
 const VERB = {
   "agent.join": "join", "agent.seen": "check in", "planner.lease": "take the planner lease", plan: "plan",
   "task.add": "add a task", "task.claim": "claim", "task.release": "release", "task.lease": "extend the lease on",
-  "task.push": "push", "task.verify": "record a verify for", "task.submit": "submit", "review.claim": "claim the review of",
+  "task.push": "push", "task.verify": "record a verify for", "task.ci": "record CI for", "task.submit": "submit", "review.claim": "claim the review of",
   "review.verdict": "review", "task.merge": "merge", "task.cancel": "cancel", "task.block": "block",
   "task.unblock": "unblock", "task.note": "add a note to", "review.waive": "waive the review of", "task.reserve": "reserve", directive: "apply a directive to",
   "comments.seen": "mark comments seen on", "phase.set": "change the phase of", "notice.sent": "record a notice on",
-  "reviewer.expire": "expire the reviewer of",
+  "agent.msg": "send a message on", "comment.new": "record a comment on",
+  "reviewer.expire": "expire the reviewer of", "config.verify": "say where the tests run on",
 };
 
 function refuse(ev, t, why, code = EXIT.PRECONDITION) {
@@ -136,7 +166,6 @@ const needAgent = (ev, t) => {
   if (ev.agent === OWNER) refuse(ev, t, "this needs an agent id, not the owner");
 };
 const latestApproveSha = (t) => t.reviews.filter((r) => r.verdict === "approve").at(-1)?.sha ?? null;
-const passingVerify = (t, sha) => !!sha && t.verify.some((v) => v.ok === true && v.sha === sha);
 const wipHeld = (L, agent, exceptId) =>
   Object.entries(L.tasks).filter(([id, t]) => id !== exceptId && t.owner === agent && WIP_STATUSES.has(t.status)).map(([id]) => id);
 const workCount = (L) => Object.values(L.tasks).filter((t) => t.kind !== "fix-ci" && t.status !== "cancelled").length;
@@ -373,7 +402,49 @@ const H = {
     const { sha, ok, summary } = ev.data;
     if (typeof sha !== "string" || !sha) refuse(ev, t, "data.sha is required");
     if (typeof ok !== "boolean") refuse(ev, t, "data.ok must be true or false");
+    // With the tests on CI, a run on a machine counts only for a task whose CI can't be trusted.
+    if (ciMode(L) && !touchesWorkflows(t).length) refuse(ev, t, "this collab runs the tests on CI; collab verify starts them there");
     t.verify.push({ sha, by: ev.agent, ok, summary: summary == null ? "" : String(summary), at: ev.at });
+  },
+
+  // CI running a task's tests ("verify": "ci"). `started`: the owner or the reviewer started the
+  // workflows on the task's branch at the head; `since` holds each workflow's newest run id before
+  // that, so only later runs count. `passed` / `failed`: whoever read the result from GitHub
+  // first records it, once; it then counts as a verify at that commit. A pass can still turn into a
+  // failure (`recheck`) when merge reads GitHub again and finds the newest run failed.
+  "task.ci"(L, ev) {
+    const t = taskOf(L, ev);
+    needStatus(ev, t, ...LIVE_STATUSES);
+    const { sha, state } = ev.data;
+    if (typeof sha !== "string" || !sha) refuse(ev, t, "data.sha is required");
+    if (sha !== t.headSha) refuse(ev, t, `the head is ${t.headSha}, not ${sha}`);
+    // Agents read these fields in collab next and status: one line each, and links only to GitHub.
+    const word = (v, max = 40) => (typeof v === "string" ? v.replace(/[^\w.-]/g, "").slice(0, max) || null : null);
+    const runs = (Array.isArray(ev.data.runs) ? ev.data.runs : []).filter((r) => r && typeof r.workflow === "string" && WORKFLOW_NAME.test(r.workflow)).slice(0, 20).map((r) => ({
+      workflow: r.workflow, id: Number.isInteger(r.id) ? r.id : null,
+      url: typeof r.url === "string" && /^https:\/\/github\.com\/[\w./-]+$/.test(r.url) ? r.url : null,
+      status: word(r.status), conclusion: word(r.conclusion),
+    }));
+    const summary = ev.data.summary == null ? "" : String(ev.data.summary).replace(/[\s\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").trim().slice(0, 300);
+    const cur = ciAt(t, sha);
+    const running = cur?.state === "running";
+    if (state === "started") {
+      if (!ciMode(L)) refuse(ev, t, "this collab runs the tests on the agents' machines, not on CI");
+      if (t.owner !== ev.agent && t.reviewer !== ev.agent) refuse(ev, t, `only the owner (${t.owner ?? "none"}) or the reviewer (${t.reviewer ?? "none"}) can start CI`);
+      if (touchesWorkflows(t).length) refuse(ev, t, "it changes a workflow, so its tests run on the machine, not on CI");
+      if (running) refuse(ev, t, `CI is already running at ${sha.slice(0, 7)}`);
+      const since = {};
+      for (const [wf, id] of Object.entries(ev.data.since && typeof ev.data.since === "object" ? ev.data.since : {}).slice(0, 20)) {
+        if (WORKFLOW_NAME.test(wf) && Number.isInteger(id) && id >= 0) since[wf] = id;
+      }
+      t.ci = { sha, state: "running", by: ev.agent, at: ev.at, runs, summary, since };
+      return;
+    }
+    if (state !== "passed" && state !== "failed") refuse(ev, t, "data.state must be started, passed or failed");
+    const recheck = state === "failed" && ev.data.recheck === true && cur?.state === "passed";
+    if (!running && !recheck) refuse(ev, t, `no CI run waits for its result at ${sha.slice(0, 7)}`);
+    t.ci = { ...t.ci, state, runs: runs.length ? runs : t.ci.runs, summary, doneAt: ev.at };
+    t.verify.push({ sha, by: ev.agent, ok: state === "passed", summary, at: ev.at, via: "ci" });
   },
 
   "task.submit"(L, ev) {
@@ -383,7 +454,13 @@ const H = {
     const sha = ev.data.sha;
     if (!t.headSha) refuse(ev, t, "nothing is pushed yet; run collab push first");
     if (sha !== t.headSha) refuse(ev, t, `the head is ${t.headSha}, not ${sha}`);
-    if (!passingVerify(t, sha)) refuse(ev, t, `no passing collab verify at ${sha.slice(0, 7)}`);
+    // With CI running the tests, a task goes to review while CI runs: the reviewer reads the diff
+    // meanwhile, and the merge waits for CI to pass.
+    const ci = ciMode(L) ? ciAt(t, sha) : null;
+    if (!verified(L, t, sha) && ci?.state !== "running") {
+      refuse(ev, t, !ciMode(L) ? `no passing collab verify at ${sha.slice(0, 7)}`
+        : ci?.state === "failed" ? `CI failed at ${sha.slice(0, 7)}; fix it first` : `CI has neither passed nor started at ${sha.slice(0, 7)}; run collab verify ${ev.task}`);
+    }
     t.status = "in_review";
     t.reviewer = null;
     t.reviewLeaseUntil = null;
@@ -395,9 +472,6 @@ const H = {
     const t = taskOf(L, ev);
     needStatus(ev, t, "in_review");
     if (t.owner === ev.agent) refuse(ev, t, "you can't review your own task");
-    const mine = L.agents[ev.agent].vendor;
-    const theirs = L.agents[t.owner]?.vendor;
-    if (mine === theirs) refuse(ev, t, `the reviewer must come from another vendor than ${t.owner} (${theirs})`);
     if (t.reviewer && t.reviewer !== ev.agent && !expired(t.reviewLeaseUntil, ev.at)) {
       refuse(ev, t, `${t.reviewer} is reviewing it until ${t.reviewLeaseUntil}`);
     }
@@ -411,7 +485,7 @@ const H = {
     needStatus(ev, t, "in_review");
     if (t.reviewer !== ev.agent) refuse(ev, t, t.reviewer ? `${t.reviewer} is the reviewer` : "claim the review first");
     const vendor = L.agents[ev.agent]?.vendor;
-    if (vendor === L.agents[t.owner]?.vendor) refuse(ev, t, "the reviewer must come from another vendor than the owner");
+    if (t.owner === ev.agent) refuse(ev, t, "you can't review your own task");
     const { verdict, sha, commentId } = ev.data;
     if (verdict !== "approve" && verdict !== "changes") refuse(ev, t, "verdict must be approve or changes");
     if (sha !== t.headSha) refuse(ev, t, `the head is ${t.headSha}, not ${sha}; review the current head`);
@@ -534,6 +608,45 @@ const H = {
     L.lastCommentId = Math.max(L.lastCommentId, id);
   },
 
+  // A message from one agent to another, or to all of them. Like a note, its text lives in the
+  // commit trailer, where `collab inbox` reads it; the ledger itself doesn't change.
+  "agent.msg"(L, ev) {
+    const to = ev.data.to;
+    if (typeof to !== "string" || (to !== "all" && !Object.hasOwn(L.agents, to))) {
+      refuse(ev, null, `${typeof to === "string" && to ? to : "(nobody)"} has not joined; send to a joined agent's id or to "all"`);
+    }
+    if (to === ev.agent) refuse(ev, null, "that is your own id");
+    if (typeof ev.data.body !== "string" || !ev.data.body.trim()) refuse(ev, null, "a message needs a body");
+  },
+
+  // A comment a person with write access left on the main PR or a task's sub-PR, recorded once so
+  // every agent's inbox shows it. Moves lastCommentId on, as comments.seen does.
+  "comment.new"(L, ev) {
+    const id = Number(ev.data.commentId);
+    if (!Number.isFinite(id)) refuse(ev, null, "data.commentId is required");
+    if (id <= L.lastCommentId) refuse(ev, null, `comment ${id} was already seen (last ${L.lastCommentId})`);
+    if (typeof ev.data.body !== "string") refuse(ev, null, "data.body is required");
+    L.lastCommentId = id;
+    if (validTime(ev.data.commentAt)) L.lastCommentAt = isoOf(ev.data.commentAt);
+  },
+
+  // The owner says where the tests run from now on: "local" (collab verify runs verifyCmd on the
+  // agent's machine) or "ci" (it starts ciWorkflows on the task's branch). What already ran stands.
+  "config.verify"(L, ev) {
+    if (ev.agent !== OWNER) refuse(ev, null, "only the owner can say where the tests run");
+    const { verify, ciWorkflows } = ev.data;
+    if (verify !== "local" && verify !== "ci") refuse(ev, null, 'data.verify must be "local" or "ci"');
+    if (ciWorkflows !== undefined) {
+      if (!Array.isArray(ciWorkflows) || !ciWorkflows.length || ciWorkflows.length > 10 || !ciWorkflows.every((w) => typeof w === "string" && WORKFLOW_NAME.test(w))) {
+        refuse(ev, null, 'data.ciWorkflows must list workflow file names, such as ["ci.yml"]');
+      }
+      L.config.ciWorkflows = [...new Set(ciWorkflows)];
+    }
+    if (verify === "ci" && !L.config.ciWorkflows?.length) refuse(ev, null, "running the tests on CI needs ciWorkflows, the workflow files that run them");
+    L.config.verify = verify;
+    L.schema = Math.max(L.schema, schemaFor(L.config));
+  },
+
   "phase.set"(L, ev) {
     if (ev.agent !== OWNER) refuse(ev, null, "only the owner can change the phase, from a terminal");
     let phase = ev.data.phase;
@@ -566,8 +679,8 @@ export const EVENT_TYPES = Object.freeze(Object.keys(H));
 
 export function apply(ledger, event) {
   if (!ledger || typeof ledger !== "object") throw new TypeError("apply needs a ledger");
-  if (ledger.schema !== SCHEMA) {
-    throw new CollabError(EXIT.ENV, `this ledger is schema ${ledger.schema}, but this collab understands schema ${SCHEMA}; update collab`);
+  if (!SCHEMAS.has(ledger.schema)) {
+    throw new CollabError(EXIT.ENV, `this ledger is schema ${ledger.schema}, but this collab understands schema ${[...SCHEMAS].join(" and ")}; update collab`);
   }
   if (!event || typeof event.type !== "string") throw new CollabError(EXIT.BUG, "malformed event: no type");
   if (!validTime(event.at)) throw new CollabError(EXIT.BUG, `malformed ${event.type} event: no valid "at" time`);
@@ -594,36 +707,80 @@ export function apply(ledger, event) {
 
 // ---------------------------------------------------------------- derived state
 
+// Reviews: any agent but a task's owner may review it, but one from another vendor than
+// its owner goes first. An agent of the owner's vendor may take a waiting review once no agent from
+// another vendor is around (seen in the last ACTIVE_MIN minutes, or holding a lease), or once the
+// review has waited reviewWaitMin minutes since the submit, so work keeps moving.
+//   eligibleReviewers   every agent that may review it
+//   preferredReviewers  of those, the ones from another vendor than the owner
+//   reviewOpenAt        when it opens to the owner's vendor too (null: not waiting for a review)
+//   reviewOpen          whether it is open to every eligible agent now
 export function derive(ledger, now) {
   const at = ms(now);
   const live = (until) => !!until && ms(until) >= at;
   const tasks = {};
   const liveAgents = new Set();
   const expiries = [];
-  const agentIds = Object.keys(ledger.agents ?? {});
+  const agents = ledger.agents ?? {};
+  const agentIds = Object.keys(agents);
+  const ids = taskIds(ledger);
 
-  for (const id of taskIds(ledger)) {
+  for (const id of ids) {
     const t = ledger.tasks[id];
-    const terminal = isTerminal(t.status);
-    const reviewStale = t.status === "in_review" && !!t.reviewer && !live(t.reviewLeaseUntil);
-    const ownerVendor = t.owner ? ledger.agents[t.owner]?.vendor : undefined;
-    tasks[id] = {
-      inProgress: t.status === "claimed" && !!t.headSha,
-      stale: STEALABLE.has(t.status) && !live(t.leaseUntil),
-      reviewStale,
-      waitingReview: t.status === "in_review" && (!t.reviewer || reviewStale),
-      eligibleReviewers: t.owner ? agentIds.filter((a) => a !== t.owner && ledger.agents[a].vendor !== ownerVendor) : [],
-    };
-    if (terminal) continue;
+    if (isTerminal(t.status)) continue;
     if (t.owner && live(t.leaseUntil)) { liveAgents.add(t.owner); expiries.push(ms(t.leaseUntil)); }
     if (t.status === "in_review" && t.reviewer && live(t.reviewLeaseUntil)) { liveAgents.add(t.reviewer); expiries.push(ms(t.reviewLeaseUntil)); }
   }
   const p = ledger.planner;
   if (p?.agent && live(p.leaseUntil)) { liveAgents.add(p.agent); expiries.push(ms(p.leaseUntil)); }
+  const around = (a) => liveAgents.has(a) || at - ms(agents[a]?.lastSeen) <= ACTIVE_MIN * 60_000;
+  const waitMin = ledger.config?.reviewWaitMin ?? DEFAULT_CONFIG.reviewWaitMin;
+  const opens = [];
+
+  for (const id of ids) {
+    const t = ledger.tasks[id];
+    const reviewStale = t.status === "in_review" && !!t.reviewer && !live(t.reviewLeaseUntil);
+    const waitingReview = t.status === "in_review" && (!t.reviewer || reviewStale);
+    const ownerVendor = t.owner ? agents[t.owner]?.vendor : undefined;
+    const eligible = t.owner ? agentIds.filter((a) => a !== t.owner) : [];
+    const preferred = eligible.filter((a) => agents[a].vendor !== ownerVendor);
+    let reviewOpenAt = null;
+    if (waitingReview) {
+      const submitted = ms(t.times?.submitted);
+      const since = Number.isNaN(submitted) ? at : submitted;
+      reviewOpenAt = new Date(preferred.some(around) ? since + waitMin * 60_000 : Math.min(since, at)).toISOString();
+      if (ms(reviewOpenAt) > at) opens.push(ms(reviewOpenAt));
+    }
+    tasks[id] = {
+      inProgress: t.status === "claimed" && !!t.headSha,
+      stale: STEALABLE.has(t.status) && !live(t.leaseUntil),
+      reviewStale,
+      waitingReview,
+      eligibleReviewers: eligible,
+      preferredReviewers: preferred,
+      reviewOpenAt,
+      reviewOpen: reviewOpenAt !== null && ms(reviewOpenAt) <= at,
+    };
+  }
 
   return {
     tasks,
     liveAgents: [...liveAgents],
     nextLeaseExpiry: expiries.length ? new Date(Math.min(...expiries)).toISOString() : null,
+    // When the next waiting review opens to the owner's vendor: `collab wait` wakes then.
+    nextReviewOpen: opens.length ? new Date(Math.min(...opens)).toISOString() : null,
   };
+}
+
+// May `agent` review task `id` now? "preferred" (another vendor than the owner), "open" (the
+// owner's vendor, once the review is open to it), or null. A null agent is one that hasn't joined
+// yet, of `vendor` (a session the keeper could start).
+export function reviewTurn(ledger, d, id, agent, vendor = ledger.agents?.[agent]?.vendor) {
+  const t = ledger.tasks?.[id];
+  const dt = d.tasks[id];
+  if (!t || !dt?.waitingReview || t.blocked) return null;
+  if (agent !== null && !dt.eligibleReviewers.includes(agent)) return null;
+  // An unknown vendor gets no first pick: only reviews already open to everyone.
+  if (vendor != null && vendor !== ledger.agents?.[t.owner]?.vendor) return "preferred";
+  return dt.reviewOpen ? "open" : null;
 }

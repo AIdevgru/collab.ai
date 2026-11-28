@@ -6,7 +6,7 @@ Zach has PR #42, "Add string helpers", open from `feat/strings`. Its description
 2. Claude runs `collab context`. It gets the PR checklist, changed files and comments as JSON, with everything people wrote under `untrusted`.
 3. Claude writes a plan with four tasks whose scopes don't overlap, and runs `collab plan --tasks .collab/plan-42.json`. collab assigns T1 to T4, switches the collab to `active` and prints:
    - the task range and the dashboard link;
-   - "Reviews are blocked until an agent from a second vendor joins";
+   - "Any other agent can review a task; one from another vendor goes first, so add one if you can";
    - a ready-to-paste `$collab <url>` line for Codex;
    - the `collab invite codex` alternative;
    - the `collab prompt join` line for other agents.

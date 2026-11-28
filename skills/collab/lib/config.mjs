@@ -4,10 +4,14 @@
 import { CollabError, EXIT } from "./errors.mjs";
 import { lsFiles, showFile } from "./git.mjs";
 
-export const DEFAULTS = Object.freeze({ leaseMin: 90, reviewLeaseMin: 60, planLeaseMin: 15, reviewAlertH: 2, maxTasks: 12, wip: 1, worktreeRoot: ".collab/wt" });
+export const DEFAULTS = Object.freeze({ leaseMin: 90, reviewLeaseMin: 60, planLeaseMin: 15, reviewAlertH: 2, reviewWaitMin: 10, maxTasks: 12, wip: 1, worktreeRoot: ".collab/wt", verify: "local" });
 
 const CMD_KEYS = ["verifyCmd", "setupCmd"];
 const INTEGER_KEYS = new Set(["maxTasks", "wip"]);
+// Keys that take one of a few words.
+const CHOICES = { verify: ["local", "ci"] };
+// A workflow file name, as GitHub's API takes it (and safe in a URL path).
+export const WORKFLOW_NAME = /^[A-Za-z0-9_.-]+\.ya?ml$/;
 const NPM_PLACEHOLDER = /no test specified/i;
 const LOCKFILES = [
   ["package-lock.json", ["npm", "ci"]],
@@ -47,6 +51,12 @@ export function loadRepoConfig(cwd, defaultBranch, io = { showFile, lsFiles }) {
       else warnings.push('.collab.json: "passEnv" must be an array of environment variable names; ignored');
       continue;
     }
+    // The workflows `collab verify` starts on a task's branch when "verify" is "ci".
+    if (key === "ciWorkflows") {
+      if (Array.isArray(value) && value.length && value.every((s) => typeof s === "string" && WORKFLOW_NAME.test(s))) config.ciWorkflows = [...new Set(value)];
+      else warnings.push('.collab.json: "ciWorkflows" must be a list of workflow file names, such as ["ci.yml"]; ignored');
+      continue;
+    }
     if (!Object.hasOwn(DEFAULTS, key)) {
       warnings.push(`.collab.json: unknown key "${key}" ignored`);
       continue;
@@ -82,17 +92,23 @@ export function loadRepoConfig(cwd, defaultBranch, io = { showFile, lsFiles }) {
     }
   }
 
+  if (config.verify === "ci" && !config.ciWorkflows?.length) {
+    warnings.push('.collab.json: "verify": "ci" needs "ciWorkflows", the workflow files that run the tests (such as ["ci.yml"]); verifying locally instead');
+    config.verify = "local";
+  }
+
   config.warnings = warnings;
   return config;
 }
 
 function validValue(key, value) {
+  if (CHOICES[key]) return CHOICES[key].includes(value);
   if (typeof DEFAULTS[key] === "string") return typeof value === "string" && value.trim() !== "";
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return false;
   return !INTEGER_KEYS.has(key) || Number.isInteger(value);
 }
 
-const describe = (key) => (typeof DEFAULTS[key] === "string" ? "a non-empty string" : INTEGER_KEYS.has(key) ? "a positive whole number" : "a positive number");
+const describe = (key) => (CHOICES[key] ? CHOICES[key].map((c) => JSON.stringify(c)).join(" or ") : typeof DEFAULTS[key] === "string" ? "a non-empty string" : INTEGER_KEYS.has(key) ? "a positive whole number" : "a positive number");
 
 function readPackageJson(read, warnings) {
   const raw = read("package.json");
