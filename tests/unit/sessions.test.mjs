@@ -3,7 +3,7 @@ import { describe, test } from "node:test";
 import { addMinutes } from "../../skills/collab/lib/clock.mjs";
 import { apply, newLedger } from "../../skills/collab/lib/ledger.mjs";
 import { claimableTasks, nextAction } from "../../skills/collab/lib/next.mjs";
-import { sessionPlan } from "../../skills/collab/lib/sessions.mjs";
+import { sessionPlan, sessionWork } from "../../skills/collab/lib/sessions.mjs";
 
 // ---------------------------------------------------------------- fixtures (time is pinned)
 
@@ -139,15 +139,25 @@ describe("sessionPlan: how many start, and on what", () => {
   });
   test("a review held for another vendor starts no session of the owner's vendor until it opens", () => {
     const CX = "codex-cx01";
-    const L = run(planned(), join(S1), join(CX, "codex"), claim(S1, "T1", 2), claim(CX, "T2", 2),
-      ev("task.push", S1, "T1", { headSha: "a1", touched: [] }, 3), ev("task.verify", S1, "T1", { sha: "a1", ok: true, summary: "" }, 4), ev("task.submit", S1, "T1", { sha: "a1" }, 5),
-      claim(S1, "T3", 6));
-    // Codex is around, so T1's review is Codex's for 10 minutes from the submit.
+    const submitted = [ev("task.push", S1, "T1", { headSha: "a1", touched: [] }, 3), ev("task.verify", S1, "T1", { sha: "a1", ok: true, summary: "" }, 4), ev("task.submit", S1, "T1", { sha: "a1" }, 5)];
+    // Codex has joined and holds nothing, so it is free; another Claude agent builds T2.
+    const L = run(planned(), join(S1), join(CX, "codex"), claim(S1, "T1", 2), claim(HOST, "T2", 2), ...submitted, claim(S1, "T3", 6));
+    // Codex is around and free, so T1's review is Codex's for 10 minutes from the submit.
     assert.deepEqual(tasksOf(sessionPlan(L, { target: 4, members: [S1], vendor: "anthropic", now: at(7) })), []);
     assert.match(sessionPlan(L, { target: 4, members: [S1], vendor: "anthropic", now: at(7) }).why, /the review of T1 goes to an agent from another vendor first/);
     assert.deepEqual(tasksOf(sessionPlan(L, { target: 4, members: [S1], vendor: "anthropic", now: at(16) })), ["review T1"]);
     // A Codex keeper may start a session for it at once.
     assert.deepEqual(tasksOf(sessionPlan(L, { target: 4, members: [], vendor: "openai", now: at(7) })), ["review T1"]);
+  });
+  test("a review waits for no agent of another vendor that is busy building its own task", () => {
+    const CX = "codex-cx01";
+    const submitted = [ev("task.push", S1, "T1", { headSha: "a1", touched: [] }, 3), ev("task.verify", S1, "T1", { sha: "a1", ok: true, summary: "" }, 4), ev("task.submit", S1, "T1", { sha: "a1" }, 5)];
+    const L = run(planned(), join(S1), join(CX, "codex"), claim(S1, "T1", 2), claim(CX, "T2", 2), ...submitted, claim(S1, "T3", 6));
+    // Codex is building T2, and `collab next` has it finish that first: T1's review opens now.
+    assert.deepEqual(tasksOf(sessionPlan(L, { target: 4, members: [S1], vendor: "anthropic", now: at(7) })), ["review T1"]);
+    // A blocked task doesn't keep its owner busy: Codex is free for the review, so it waits again.
+    const blocked = run(L, ev("task.block", CX, "T2", { reason: "which API?", needsOwner: true }, 6));
+    assert.deepEqual(tasksOf(sessionPlan(blocked, { target: 4, members: [S1], vendor: "anthropic", now: at(7) })), []);
   });
   test("a fix-ci task goes first", () => {
     const L = run(planned(), ev("task.add", HOST, null, { title: "Fix CI", desc: "", accept: [], scope: [], deps: [], size: "S", kind: "fix-ci", forSha: "abc" }, 2));
@@ -194,5 +204,32 @@ describe("claimableTasks", () => {
     assert.deepEqual(claimableTasks(L, null, at(5)), { open: ["T2"], claimable: [] });
     // next still picks the same task it did before the helper existed.
     assert.equal(nextAction(L, S1, null, at(5)).task, "T3");
+  });
+});
+
+// collab status shows what each session works on now. Found by the real-Claude run: a session
+// started for T2 went on to T3, and status still said "(T2)".
+describe("sessionWork", () => {
+  const L = (tasks) => ({ tasks });
+  const m = { id: "claude-s1", task: "T2" };
+  test("the task it builds now, not the one it was started for", () => {
+    const l = L({ T2: { status: "done", owner: "claude-s1" }, T3: { status: "claimed", owner: "claude-s1" } });
+    assert.deepEqual(sessionWork(l, m), { task: "T3", steal: false });
+  });
+  test("a review it holds, then its own task waiting in review", () => {
+    const l = L({ T1: { status: "in_review", owner: "claude-x", reviewer: "claude-s1" }, T2: { status: "in_review", owner: "claude-s1", reviewer: null } });
+    assert.deepEqual(sessionWork(l, m), { task: null, steal: false, review: "T1" });
+    l.tasks.T1.status = "approved";
+    assert.deepEqual(sessionWork(l, m), { task: "T2", steal: false });
+  });
+  test("before it takes anything: what it was started for", () => {
+    assert.deepEqual(sessionWork(L({ T2: { status: "open", reserved: { agent: "claude-s1" } } }), m), { task: "T2", steal: false });
+    assert.deepEqual(sessionWork(L({ T2: { status: "claimed", owner: "claude-gone" } }), { ...m, steal: true }), { task: "T2", steal: true });
+    assert.deepEqual(sessionWork(L({ T1: { status: "in_review", owner: "claude-x", reviewer: null } }), { id: "claude-s1", review: "T1" }), { task: null, steal: false, review: "T1" });
+    assert.deepEqual(sessionWork(L({}), { id: "claude-s1" }), { task: null, steal: false }, "the session that writes the plan");
+  });
+  test("its work merged, it waits for more", () => {
+    assert.deepEqual(sessionWork(L({ T2: { status: "done", owner: "claude-s1" } }), m), { task: null, steal: false, idle: true });
+    assert.deepEqual(sessionWork(L({ T1: { status: "done", owner: "claude-x" } }), { id: "claude-s1", review: "T1" }), { task: null, steal: false, idle: true });
   });
 });

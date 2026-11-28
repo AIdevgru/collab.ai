@@ -3,7 +3,7 @@ import { describe, test } from "node:test";
 import { addMinutes } from "../../skills/collab/lib/clock.mjs";
 import { CollabError, EXIT } from "../../skills/collab/lib/errors.mjs";
 import {
-  PHASES, SCHEMA, STATUSES, VENDORS, apply, cancelledDeps, ciAt, ciMode, derive, isTerminal, newLedger, taskIds, touchesWorkflows, unmetDeps, vendorOf, verified,
+  PHASES, SCHEMA, STATUSES, VENDORS, apply, cancelledDeps, ciAt, ciMode, derive, isTerminal, newLedger, reviewTurn, taskIds, touchesWorkflows, unmetDeps, vendorOf, verified,
 } from "../../skills/collab/lib/ledger.mjs";
 
 // ---------------------------------------------------------------- fixtures (time is pinned)
@@ -860,6 +860,32 @@ describe("derive", () => {
     // Not waiting for a reviewer: no opening time.
     assert.equal(derive(state("reviewing"), at(6)).tasks.T1.reviewOpenAt, null);
     assert.equal(derive(state("claimed"), at(6)).tasks.T1.reviewOpenAt, null);
+  });
+  test("a review waits only for an agent of another vendor that is free: not building a task, not holding a review", () => {
+    // CODEX builds T2 (claimed, lease live). `next` has it finish T2 first, so T1's review opens at its submit.
+    const building = run(state("in_review"), claim(CODEX, "T2", 4));
+    assert.equal(derive(building, at(5)).tasks.T1.reviewOpenAt, at(4));
+    assert.equal(derive(building, at(5)).tasks.T1.reviewOpen, true);
+    assert.equal(derive(building, at(5)).nextReviewOpen, null);
+    // Sent back for changes counts as building too.
+    const fixing = run(planned(), ...[claim(CODEX, "T2", 1), push(CODEX, "T2", "c1", 2), verify(CODEX, "T2", "c1", true, 2), submit(CODEX, "T2", "c1", 2), rclaim(CLAUDE2, "T2", 2), verdict(CLAUDE2, "T2", "changes", "c1", 3)],
+      claim(CLAUDE, "T1", 1), push(CLAUDE, "T1", "sha1", 2), verify(CLAUDE, "T1", "sha1", true, 3), submit(CLAUDE, "T1", "sha1", 4));
+    assert.equal(derive(fixing, at(5)).tasks.T1.reviewOpen, true);
+    // CODEX holds a review of T4: busy as well.
+    const reviewing = run(state("in_review"), claim(CLAUDE2, "T4", 2), push(CLAUDE2, "T4", "d1", 2), verify(CLAUDE2, "T4", "d1", true, 2), submit(CLAUDE2, "T4", "d1", 2), rclaim(CODEX, "T4", 3));
+    assert.equal(derive(reviewing, at(5)).tasks.T1.reviewOpen, true);
+    // ...unless T4 is blocked: `next` skips that review and offers CODEX others, so it is free.
+    const blockedReview = run(reviewing, ev("task.block", CLAUDE2, "T4", { reason: "which API?", needsOwner: true }, 4));
+    assert.equal(derive(blockedReview, at(5)).tasks.T1.reviewOpenAt, at(14));
+    // A blocked task doesn't keep its owner busy: CODEX is free, so the review waits for it again.
+    const blocked = run(building, ev("task.block", CODEX, "T2", { reason: "which API?", needsOwner: true }, 4));
+    assert.equal(derive(blocked, at(5)).tasks.T1.reviewOpenAt, at(14));
+    // One free agent of another vendor is enough to hold it: GEMINI has joined and holds nothing.
+    const gemini = run(building, ev("agent.join", GEMINI, null, { tool: "gemini" }, 4));
+    assert.equal(derive(gemini, at(5)).tasks.T1.reviewOpenAt, at(14));
+    // Whoever is busy, an agent of another vendor still gets the review first when it asks.
+    assert.equal(reviewTurn(building, derive(building, at(5)), "T1", CODEX), "preferred");
+    assert.equal(reviewTurn(building, derive(building, at(5)), "T1", CLAUDE2), "open");
   });
   test("liveAgents and nextLeaseExpiry", () => {
     // Planning: only the planner.

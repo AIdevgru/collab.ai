@@ -114,3 +114,19 @@ test("cancelling a task frees the tasks that waited on it", () => {
   assert.equal(board.code, 0, board.out);
   assert.doesNotMatch(board.stdout, /was claimed although its scope overlaps work in flight/);
 });
+
+test("next offers first the task that the most work waits on, though another comes first by id", () => {
+  const t = setup();
+  try {
+    const ids = t.start([
+      { title: "Docs", accept: ["a"], scope: ["docs/**"], size: "S" },
+      { title: "Core", accept: ["b"], scope: ["src/core.mjs"], size: "S" },
+      { title: "Uses core", accept: ["c"], scope: ["src/use.mjs"], deps: ["T2"], size: "L" },
+    ], []);
+    const n = t.json("claude", ["next", "--pr", "1", "--agent", ids.claude]);
+    assert.equal(n.code, 0, n.out);
+    assert.deepEqual([n.data.action, n.data.task], ["claim", "T2"]);
+  } finally {
+    t.cleanup();
+  }
+});

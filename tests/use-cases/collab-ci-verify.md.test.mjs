@@ -239,10 +239,20 @@ test("a task that changes a workflow is verified on the machine, not on CI", () 
   ok(s.as("codex", X(), ["submit", "T3"]));
   assert.equal(runs("collab/pr-1/t3").length, 0, "submit used the verify on the machine");
   // Found by the run on real GitHub: review-claim told the reviewer that CI runs T3's tests.
+  // Codex's run on the machine passed at this very commit, so the reviewer doesn't run them again.
   const rc = s.as("claude", C(), ["review-claim", "T3"]);
   ok(rc);
-  assert.match(rc.out, /T3 changes a workflow \(\.github\/workflows\/ci\.yml\), so its tests run on this machine, not on CI: collab verify T3 .*, before you approve\./);
+  assert.match(rc.out, new RegExp(`The tests already passed at [0-9a-f]{7}, the commit you review \\(${X()}, .*so don't run them again\\.`));
+  assert.equal(s.json("claude", ["review-claim", "T3", "--pr", "1", "--agent", C()]).data.testsPassed.by, X());
   assert.doesNotMatch(rc.out, /CI runs the tests, so you don't/);
+  // Codex pushes again without running them: nothing passed at the new head, so the reviewer runs
+  // them on the machine before approving.
+  write("T3", ".github/workflows/ci.yml", CI_YML.replace("npm test", "npm test && npm run test:node24 # v2"));
+  ok(s.as("codex", X(), ["push", "T3"]));
+  const again = s.as("claude", C(), ["review-claim", "T3"]);
+  ok(again);
+  assert.match(again.out, /T3 changes a workflow \(\.github\/workflows\/ci\.yml\), so its tests run on this machine, not on CI: collab verify T3 .*, before you approve\./);
+  assert.doesNotMatch(again.out, /already passed|CI runs the tests, so you don't/);
 });
 
 test("a workflow with no run after 15 minutes, or no runner after an hour, counts as failed", () => {

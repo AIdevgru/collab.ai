@@ -60,7 +60,7 @@ export function sessionPlan(ledger, { target, members = [], reviewing = {}, host
   if (ids.length && ids.every((id) => isTerminal(T[id].status))) return { ...none(`every task on PR #${n} is done or cancelled`), stop: "done" };
 
   const { claimable } = claimableTasks(ledger, null, now, { files });
-  // `collab next` offers a fix-ci task first, then id order.
+  // `collab next` offers a fix-ci task first, then the rest in claimableTasks' critical-path order.
   const ordered = [...claimable.filter((id) => T[id].kind === "fix-ci"), ...claimable.filter((id) => T[id].kind !== "fix-ci")];
   // Two open tasks whose scopes overlap can't both be built at once: once one is claimed, `claim`
   // refuses the other. A task reserved for a session that hasn't claimed it yet, and a task picked
@@ -131,4 +131,26 @@ function idleReason(ledger, d, ids, at) {
   const held = ids.filter((id) => d.tasks[id].waitingReview && !d.tasks[id].reviewOpen && !T[id].blocked);
   if (held.length) parts.push(`the review of ${held.join(", ")} goes to an agent from another vendor first`);
   return `no more tasks can start now${parts.length ? `: ${parts.join("; ")}` : ""}`;
+}
+
+// What a session works on now, from the ledger: the task it builds, else the review it holds, else
+// a task of its waiting in review. A session that has taken nothing yet shows what it was started
+// for. A session moves on to other tasks once its first is done, so the keeper's record goes stale.
+export function sessionWork(l, m) {
+  const T = l?.tasks ?? {};
+  const ids = Object.keys(T);
+  const building = ids.filter((id) => T[id].owner === m.id && (T[id].status === "claimed" || T[id].status === "changes_requested"));
+  const reviewing = ids.filter((id) => T[id].reviewer === m.id && T[id].status === "in_review");
+  const waiting = ids.filter((id) => T[id].owner === m.id && (T[id].status === "in_review" || T[id].status === "approved"));
+  if (building.length) return { task: building.join(", "), steal: false };
+  if (reviewing.length) return { task: null, steal: false, review: reviewing.join(", ") };
+  if (waiting.length) return { task: waiting.join(", "), steal: false };
+  // Not started on what it was started for yet (still reserved, or the review still unclaimed),
+  // or nothing to start from (the session that writes the plan): show that. Otherwise its work is
+  // merged and it waits for more.
+  const t = m.task ? T[m.task] : m.review ? T[m.review] : null;
+  if (!t || (m.task ? t.status === "open" || (m.steal && t.owner !== m.id) : t.status === "in_review" && !t.reviewer)) {
+    return { task: m.task ?? null, steal: !!m.steal, ...(m.review ? { review: m.review } : {}) };
+  }
+  return { task: null, steal: false, idle: true };
 }

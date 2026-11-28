@@ -8,8 +8,9 @@
 //   3. review  a review I already hold
 //   4. work    my claimed task: push, verify, submit
 //   5. review  a task waiting for a reviewer: another vendor's first; one of my own vendor's
-//              once no agent from another vendor is around, or after reviewWaitMin
-//   6. claim   the first claimable open task (fix-ci tasks first, then id order)
+//              once no agent from another vendor is free to take it, or after reviewWaitMin
+//   6. claim   the first claimable open task (fix-ci tasks first, then the longest chain of
+//              work that waits on it, then id order)
 //   7. merge / reclaim  a stale task: merge it if approved and green, otherwise steal it
 //   8. done or wait
 
@@ -210,16 +211,44 @@ export function nextAction(ledger, me, live, now, { files = [] } = {}) {
 
 // The open tasks `me` could claim now. `open`: not blocked, dependencies done, not reserved for
 // another agent. `claimable`: of those, the ones whose scope overlaps no other agent's work in
-// flight (the rule `collab claim` applies: my own in-flight tasks never block me). In id order.
-// With `me` null, it is the view of an agent that hasn't joined yet (collab invite --sessions):
-// every reservation and every task in flight counts.
+// flight (the rule `collab claim` applies: my own in-flight tasks never block me). In critical-path
+// order (see criticalRanks). With `me` null, it is the view of an agent that hasn't joined yet
+// (collab invite --sessions): every reservation and every task in flight counts.
 export function claimableTasks(ledger, me, now, { files = [] } = {}) {
   const T = ledger.tasks ?? {};
   const ids = taskIds(ledger);
   const inFlight = ids.filter((id) => IN_FLIGHT.has(T[id].status) && (me === null || T[id].owner !== me));
   const overlaps = (id) => inFlight.some((o) => o !== id && intersect(T[id].scope ?? [], [], T[o].scope ?? [], T[o].touched ?? [], files).length > 0);
-  const open = ids.filter((id) => T[id].status === "open" && !T[id].blocked && unmetDeps(ledger, T[id]).length === 0 && !reservedForOther(T[id], me, now));
+  const rank = criticalRanks(ledger);
+  const order = new Map(ids.map((id, i) => [id, i]));
+  const open = ids
+    .filter((id) => T[id].status === "open" && !T[id].blocked && unmetDeps(ledger, T[id]).length === 0 && !reservedForOther(T[id], me, now))
+    .sort((a, b) => rank.get(b) - rank.get(a) || order.get(a) - order.get(b));
   return { open, claimable: open.filter((id) => !overlaps(id)) };
+}
+
+// Critical-path ranks for the unfinished tasks, so the work that holds up the most other work starts
+// first (list scheduling). A task weighs its size (S 1, M 2, L 3); its rank is its weight plus the
+// highest rank among the unfinished tasks that wait on it. A task that depends on a cancelled one
+// waits on that task's own dependencies instead (unmetDeps), and done tasks hold up nothing.
+const WEIGHT = { S: 1, M: 2, L: 3 };
+export function criticalRanks(ledger) {
+  const T = ledger.tasks ?? {};
+  const ids = taskIds(ledger).filter((id) => !isTerminal(T[id].status));
+  const waiting = new Map(ids.map((id) => [id, []]));
+  for (const id of ids) for (const dep of unmetDeps(ledger, T[id])) waiting.get(dep)?.push(id);
+  const rank = new Map();
+  const visit = (id, path) => {
+    if (rank.has(id)) return rank.get(id);
+    if (path.has(id)) return 0; // a dependency cycle: plan refuses one, but never loop on it
+    path.add(id);
+    const r = (WEIGHT[T[id].size] ?? WEIGHT.M) + Math.max(0, ...waiting.get(id).map((w) => visit(w, path)));
+    path.delete(id);
+    rank.set(id, r);
+    return r;
+  };
+  for (const id of ids) visit(id, new Set());
+  return rank;
 }
 
 // An open task the owner set aside for another agent they invited (collab invite --task).

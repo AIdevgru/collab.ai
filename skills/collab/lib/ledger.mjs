@@ -709,8 +709,10 @@ export function apply(ledger, event) {
 
 // Reviews: any agent but a task's owner may review it, but one from another vendor than
 // its owner goes first. An agent of the owner's vendor may take a waiting review once no agent from
-// another vendor is around (seen in the last ACTIVE_MIN minutes, or holding a lease), or once the
-// review has waited reviewWaitMin minutes since the submit, so work keeps moving.
+// another vendor is free to take it, or once the review has waited reviewWaitMin minutes since the
+// submit, so work keeps moving. Free means around (seen in the last ACTIVE_MIN minutes, or holding a
+// lease) and not busy: an agent building a task (claimed or sent back, not blocked, lease live) or
+// holding a review lease is busy, because `collab next` has it finish that before it takes a review.
 //   eligibleReviewers   every agent that may review it
 //   preferredReviewers  of those, the ones from another vendor than the owner
 //   reviewOpenAt        when it opens to the owner's vendor too (null: not waiting for a review)
@@ -720,6 +722,7 @@ export function derive(ledger, now) {
   const live = (until) => !!until && ms(until) >= at;
   const tasks = {};
   const liveAgents = new Set();
+  const busy = new Set();
   const expiries = [];
   const agents = ledger.agents ?? {};
   const agentIds = Object.keys(agents);
@@ -728,12 +731,22 @@ export function derive(ledger, now) {
   for (const id of ids) {
     const t = ledger.tasks[id];
     if (isTerminal(t.status)) continue;
-    if (t.owner && live(t.leaseUntil)) { liveAgents.add(t.owner); expiries.push(ms(t.leaseUntil)); }
-    if (t.status === "in_review" && t.reviewer && live(t.reviewLeaseUntil)) { liveAgents.add(t.reviewer); expiries.push(ms(t.reviewLeaseUntil)); }
+    if (t.owner && live(t.leaseUntil)) {
+      liveAgents.add(t.owner);
+      expiries.push(ms(t.leaseUntil));
+      if (WIP_STATUSES.has(t.status) && !t.blocked) busy.add(t.owner);
+    }
+    if (t.status === "in_review" && t.reviewer && live(t.reviewLeaseUntil)) {
+      liveAgents.add(t.reviewer);
+      // `next` skips a review of a blocked task and offers its reviewer other reviews.
+      if (!t.blocked) busy.add(t.reviewer);
+      expiries.push(ms(t.reviewLeaseUntil));
+    }
   }
   const p = ledger.planner;
   if (p?.agent && live(p.leaseUntil)) { liveAgents.add(p.agent); expiries.push(ms(p.leaseUntil)); }
   const around = (a) => liveAgents.has(a) || at - ms(agents[a]?.lastSeen) <= ACTIVE_MIN * 60_000;
+  const free = (a) => around(a) && !busy.has(a);
   const waitMin = ledger.config?.reviewWaitMin ?? DEFAULT_CONFIG.reviewWaitMin;
   const opens = [];
 
@@ -748,7 +761,7 @@ export function derive(ledger, now) {
     if (waitingReview) {
       const submitted = ms(t.times?.submitted);
       const since = Number.isNaN(submitted) ? at : submitted;
-      reviewOpenAt = new Date(preferred.some(around) ? since + waitMin * 60_000 : Math.min(since, at)).toISOString();
+      reviewOpenAt = new Date(preferred.some(free) ? since + waitMin * 60_000 : Math.min(since, at)).toISOString();
       if (ms(reviewOpenAt) > at) opens.push(ms(reviewOpenAt));
     }
     tasks[id] = {

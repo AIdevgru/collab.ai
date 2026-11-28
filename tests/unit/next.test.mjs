@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { addMinutes } from "../../skills/collab/lib/clock.mjs";
 import { apply, newLedger } from "../../skills/collab/lib/ledger.mjs";
-import { nextAction } from "../../skills/collab/lib/next.mjs";
+import { claimableTasks, criticalRanks, nextAction } from "../../skills/collab/lib/next.mjs";
 
 // ---------------------------------------------------------------- fixtures (time is pinned)
 
@@ -109,6 +109,38 @@ describe("next: claim", () => {
   test("my own in-flight task never blocks my claim on overlap grounds", () => {
     const L = run(planned([spec("a", { scope: ["src/**"] }), spec("b", { scope: ["src/a.js"] })]), ...submitted(CLAUDE, "T1", "s1"));
     assert.equal(nextAction(L, CLAUDE, green(), at(10)).task, "T2");
+  });
+  test("the task with the longest chain of work waiting on it goes first, then the bigger one, then id order", () => {
+    // T2 holds up T3 and, through it, T4 (L): 1 + 1 + 3 = 5. T1 holds up nothing: 1.
+    const chain = planned([spec("one"), spec("two"), spec("three", { deps: ["T2"] }), spec("four", { deps: ["T3"], size: "L" })]);
+    assert.equal(nextAction(chain, CLAUDE, green(), at(5)).task, "T2");
+    assert.deepEqual(claimableTasks(chain, CLAUDE, at(5)).claimable, ["T2", "T1"]);
+    assert.deepEqual(Object.fromEntries(criticalRanks(chain)), { T1: 1, T2: 5, T3: 4, T4: 3 });
+    // Alone, an L task outranks an S task with one S task waiting on it (3 against 2).
+    const sizes = planned([spec("small"), spec("big", { size: "L" }), spec("after", { deps: ["T1"] })]);
+    assert.equal(nextAction(sizes, CLAUDE, green(), at(5)).task, "T2");
+    // Equal ranks keep id order.
+    assert.deepEqual(claimableTasks(planned([spec("a"), spec("b"), spec("c")]), CLAUDE, at(5)).claimable, ["T1", "T2", "T3"]);
+    // Done tasks hold up nothing, and a task that waits on a cancelled one waits on that one's dependencies.
+    const cancelled = run(planned([spec("one"), spec("two", { deps: ["T1"] }), spec("three", { deps: ["T2"], size: "L" }), spec("four", { size: "M" })]),
+      ev("task.cancel", "owner", "T2", { reason: "not needed" }));
+    assert.deepEqual(Object.fromEntries(criticalRanks(cancelled)), { T1: 4, T3: 3, T4: 2 });
+    assert.equal(nextAction(cancelled, CLAUDE, green(), at(5)).task, "T1");
+    // A fix-ci task and a task reserved for me still come first.
+    const fix = apply(chain, ev("task.add", CODEX, null, { kind: "fix-ci", forSha: "deadbeef" }));
+    assert.equal(nextAction(fix, CLAUDE, { mainCi: "FAILURE", subs: {} }, at(5)).task, "T5");
+    const reserved = apply(chain, ev("task.reserve", "owner", "T1", { for: CLAUDE, until: at(120) }, 2));
+    assert.equal(nextAction(reserved, CLAUDE, green(), at(5)).task, "T1");
+    assert.equal(nextAction(reserved, CLAUDE2, green(), at(5)).task, "T2");
+  });
+  test("criticalRanks never loops on a dependency cycle", () => {
+    const L = planned([spec("a"), spec("b")]);
+    const cyclic = structuredClone(L);
+    cyclic.tasks.T1.deps = ["T2"];
+    cyclic.tasks.T2.deps = ["T1"];
+    const ranks = criticalRanks(cyclic);
+    assert.deepEqual([...ranks.keys()].sort(), ["T1", "T2"]);
+    for (const r of ranks.values()) assert.ok(Number.isFinite(r));
   });
 });
 

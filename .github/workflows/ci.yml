@@ -32,12 +32,12 @@ jobs:
         # only. Their changes still meet Windows on the PR into the default branch.
         os: ${{ fromJSON((github.event_name == 'push' || github.base_ref == github.event.repository.default_branch || inputs.full) && '["ubuntu-latest","windows-latest"]' || '["ubuntu-latest"]') }}
         node: [22, 24]
-        # node --test sorts the test files and keeps file i in shard (i % 3) + 1. The 3 in the
-        # name above and in the test step must equal the length of this list.
+        # scripts/test-shard.mjs splits the test files by their measured time on each OS. The 3 in
+        # the name above and in the test step must equal the length of this list.
         shard: [1, 2, 3]
     runs-on: ${{ matrix.os }}
-    # The slowest shard takes about 7 minutes on a private repo's 2-core Windows runner. The whole
-    # suite in one job took about 19.
+    # Each shard takes about 2 minutes on Linux and 7 on Windows, on a private repo's 2-core runner,
+    # where node runs the test files one at a time. The whole suite in one Windows job took about 19.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
@@ -45,7 +45,8 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: git config --global user.name "collab-ci" && git config --global user.email "collab-ci@users.noreply.github.com"
-      # The command of npm test (package.json scripts.test), plus the shard. It can't go through npm:
-      # after the glob, node no longer reads --test-shard as an option, so every shard would run the
-      # whole suite.
-      - run: node --test --test-shard=${{ matrix.shard }}/3 "tests/**/*.test.mjs"
+      # The files npm test runs (package.json scripts.test), this shard's share of them. node's own
+      # --test-shard deals the files out in turn, which put the slowest together: one Windows shard
+      # took 11 minutes while another took 4. The step also logs each file's time; to refresh the
+      # split after a full run: gh run view <run id> --log | node scripts/test-shard.mjs --update
+      - run: node scripts/test-shard.mjs ${{ matrix.shard }}/3

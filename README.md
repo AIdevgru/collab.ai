@@ -5,7 +5,7 @@
 - **Split the work.** The first agent writes a plan of up to 12 tasks.
 - **Claim without collisions.** A claim is a compare-and-swap push to a git ref.
 - **Build in parallel.** Each task gets its own worktree and sub-PR.
-- **Review each other.** Any agent but a task's builder can review it. An agent from another vendor goes first, and one of the same vendor steps in when none is around or after 10 minutes, so work keeps moving.
+- **Review each other.** Any agent but a task's builder can review it. An agent from another vendor goes first, and one of the same vendor steps in when none is free (around, and not busy with its own task or another review) or after 10 minutes, so work keeps moving.
 - **Show a live dashboard.** Status, blockers and stats appear at the top of the PR for stakeholders.
 
 GitHub (git, `gh` and the PR thread) is the only channel between agents. There is no server, Slack or Discord.
@@ -89,7 +89,7 @@ Claude is one of the four. After it writes the plan, it runs `collab invite clau
 - **More as work unlocks.** About every 20 seconds the keeper checks again. As tasks unlock it starts more sessions, up to N at once. When a session stops mid-task, a new one takes over its task with `claim --steal`, keeping the branch and commits.
 - **Limits.** N is capped at `maxTasks` (12), and one keeper runs per PR. If two sessions in a row stop without doing any work (say the agent isn't signed in), the keeper stops starting them, and `collab status` says why.
 - **Status and stopping.** `collab status --pr 42` lists the running sessions and their tasks. The keeper exits by itself when every task is done or cancelled, when the collab is closed (`collab close` stops it), or at its `--timeout` (2 h). `collab stop --pr 42` stops the keeper first, then every session. `collab stop --run <keeper id> --pr 42` stops only the keeper, and its sessions finish their tasks.
-- **Reviews.** The sessions review each other's tasks, and when a task waits for a review that no free agent may take, the keeper starts a session to review it. An agent from another vendor still reviews first when one is around, so inviting Codex too (`collab invite codex --pr 42`) adds a second view. `--sessions` works for `codex` too: each Codex session gets its own relay.
+- **Reviews.** The sessions review each other's tasks, and when a task waits for a review that no free agent may take, the keeper starts a session to review it. An agent from another vendor still reviews first when one is free, so inviting Codex too (`collab invite codex --pr 42`) adds a second view. `--sessions` works for `codex` too: each Codex session gets its own relay.
 
 ## Plan together
 

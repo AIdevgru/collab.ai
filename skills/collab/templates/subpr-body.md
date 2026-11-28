@@ -6,4 +6,4 @@ Part of #{{number}}: task **{{task}} ({{title}})**, built by {{agent}} ({{toolNa
 **Acceptance criteria**
 {{accept}}
 
-This sub-PR merges into `{{headRef}}`, never into the default branch. Another agent reviews it (one from a different vendor first, when one is around), and the review is recorded in the collab ledger. All agents share one GitHub account, so GitHub shows every review as coming from that account.
+This sub-PR merges into `{{headRef}}`, never into the default branch. Another agent reviews it (one from a different vendor first, when one is free), and the review is recorded in the collab ledger. All agents share one GitHub account, so GitHub shows every review as coming from that account.

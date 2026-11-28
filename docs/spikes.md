@@ -146,3 +146,20 @@ Not changed (none come from this PR):
 - **Duplicate push lines in the inbox.** `submit` pushes first and records `task.push` even when the commit is unchanged, so the inbox can say "pushed to T2" several times for one change. dev's `main` does the same.
 - **No `--allow-protected` in the dashboard hint.** For a block about a protected file, the dashboard's "Needs attention" line says `collab decide T4 "<answer>" --pr 25` without `--allow-protected`. Only the push error names it.
 - **The dashboard doesn't change after a switch.** `collab tests` doesn't re-render the dashboard, so the move shows up there at the next write.
+
+## End-to-end parallel sessions with real Claude (2026-11-28, PR #30 of `AIdevgru/collab-e2e-20261116`)
+
+This used the installed collab, with parallel sessions and the tests on CI in. Claude, in this session (`claude-8dmm`), planned three tasks: T1 repeat, T2 reverse, and T3 an index that depends on both. Then it ran `collab invite claude --sessions 1 --model sonnet --pr 30 --agent claude-8dmm`. Only one session was started because the machine had 2 GB of memory free. The tests ran on the agents' machines.
+
+| Check | Result |
+|---|---|
+| The keeper starts as many sessions as there is work for, and leaves one task for the agent that asked | ✅ `Started 1 now: claude-2m29 (T2)`, with T1 left for `claude-8dmm`. |
+| A real headless session builds, reviews and merges | ✅ `claude-2m29` (Sonnet, through the invite's tool lists) joined, claimed T2, wrote it, then ran `note`, `push`, `verify` and `submit`. About a minute later it reviewed T1 with `collab diff` and `verify`, wrote `.collab/review-pr30-t1.md` and approved it. It merged its own T2 once `claude-8dmm` approved it. |
+| More work starts as tasks unlock | ✅ When T1 and T2 merged, the session claimed T3 within about 10 s, built it, and merged it after review. |
+| The session and the keeper end by themselves | ✅ The session's last `next` said `done`, and it stopped without touching the main PR: 47 turns, $0.41. The keeper stopped as `done` 6 min 47 s after the invite. The session's watchdog recorded `exited` 50 s later, and `status` then said `Still running: none`. |
+| Dashboard, `main`, owner text | ✅ "Ready for owner review"; `main` still `bbe4fe7`; `HUMAN TEXT SENTINEL` intact. |
+| Permission denials | ⚠️ One: an `ls` of several worktree paths. The session went on with Glob. |
+
+What the run showed:
+- **Owners' own rules reach the sessions.** The session read the owner's global `CLAUDE.md`, which asks for a use-case story and test with every feature. So it added `tests/use-cases/reverse.md` (and `index.md`) with their tests, outside the task's scope. It said so with `collab note T2` before pushing, as PROTOCOL rule 5 asks, and the reviewer saw the note. No other task owned those files. collab doesn't stop such files at push; only scopes that overlap between tasks, and protected files, are checked.
+- **Bug, fixed with a test: `collab status` named a session's first task.** It said `claude-2m29 (T2)` while the session was building T3, because the keeper records the task it started each session for. `status` now reads the ledger (`sessionWork` in `sessions.mjs`): the task a session builds, else the review it holds, else its task in review, else what it was started for if it hasn't taken that yet. A session whose work is all merged shows `(waits for work)`. The keeper's reason line (`the agents already free can take T3`) is from its last round, so it can lag a claim by up to 20 s.
